@@ -745,6 +745,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-backtrace"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fbfed00e884572d620a6958b13456fc2bb8ab75802b5adc8afc224f97cdebad"
+dependencies = [
+ "document-features",
+ "esp-config",
+ "esp-metadata-generated",
+ "esp-println",
+ "heapless 0.9.3",
+ "riscv",
+ "semihosting",
+ "xtensa-lx",
+]
+
+[[package]]
 name = "esp-bootloader-esp-idf"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -811,7 +827,7 @@ dependencies = [
  "esp32c2",
  "esp32c3",
  "esp32c5",
- "esp32c6",
+ "esp32c6 0.24.0",
  "esp32c61",
  "esp32h2",
  "esp32p4",
@@ -870,7 +886,9 @@ dependencies = [
  "esp-hal",
  "esp-metadata-generated",
  "esp-sync",
+ "esp-wifi-sys-esp32c6",
  "esp-wifi-sys-esp32s3",
+ "esp32c6 0.25.0",
  "esp32s3 0.37.0",
  "log",
 ]
@@ -923,6 +941,7 @@ dependencies = [
  "esp-wifi-sys-esp32s2",
  "esp-wifi-sys-esp32s3",
  "esp-wifi-sys-esp32s31",
+ "esp32c6 0.25.0",
  "esp32s3 0.37.0",
  "heapless 0.9.3",
  "instability",
@@ -964,6 +983,7 @@ checksum = "e933ff78374b763b65998b64ad671b4890ed4ba13a80deff9f53afe95ede289d"
 dependencies = [
  "document-features",
  "esp-metadata-generated",
+ "esp32c6 0.24.0",
  "esp32s3 0.36.0",
 ]
 
@@ -1006,6 +1026,7 @@ dependencies = [
  "esp-metadata-generated",
  "esp-rom-sys",
  "esp-sync",
+ "esp32c6 0.24.0",
  "esp32s3 0.36.0",
 ]
 
@@ -1137,6 +1158,15 @@ name = "esp32c6"
 version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a207a5d6886ca89b4f220606dcf3779ca869803df192508314939186ae8de1ee"
+dependencies = [
+ "vcell",
+]
+
+[[package]]
+name = "esp32c6"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f90472d3e6a752e5d20533796f649760103ea449319f14d2a26b2fdff95633bb"
 dependencies = [
  "vcell",
 ]
@@ -1832,6 +1862,7 @@ dependencies = [
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
  "esp-alloc",
+ "esp-backtrace",
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
@@ -1842,6 +1873,12 @@ dependencies = [
  "static_cell",
  "trouble-host",
 ]
+
+[[package]]
+name = "semihosting"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8e4abf97879f4e80db69a9fba7bd64998e9bdad25f58ef045a778e191172fd4"
 
 [[package]]
 name = "serde"

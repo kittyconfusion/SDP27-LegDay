@@ -7,4 +7,9 @@
   "rust-analyzer.cargo.extraEnv": {
     "RUSTUP_TOOLCHAIN": "esp"
   },
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer",
+    "editor.formatOnSave": true,
+    "editor.formatOnSaveMode": "file"
+  },
 }
