@@ -7,9 +7,9 @@ cd "$project_dir"
 
 action="${1:-help}"
 case "$action" in
-    build|smoke-build|smoke|app|monitor) ;;
+    build|c6-build|smoke-build|smoke|app|monitor) ;;
     *)
-        echo "Usage: $0 {build|smoke-build|smoke|app|monitor} [serial-port]"
+        echo "Usage: $0 {build|c6-build|smoke-build|smoke|app|monitor} [serial-port]"
         echo "smoke/app build, flash, and monitor; Ctrl+C exits the monitor."
         exit 0
         ;;
@@ -21,7 +21,7 @@ fi
 
 # The previous std-only espup setup skipped installing GCC into the esp toolchain.
 # Reuse the ESP-IDF-managed installation when available, or espup's installation.
-if [[ "$action" != monitor ]] && ! command -v xtensa-esp32s3-elf-gcc >/dev/null 2>&1; then
+if [[ "$action" != monitor && "$action" != c6-build ]] && ! command -v xtensa-esp32s3-elf-gcc >/dev/null 2>&1; then
     if [[ -n "${ESP_XTENSA_GCC_BIN:-}" ]]; then
         export PATH="$ESP_XTENSA_GCC_BIN:$PATH"
     else
@@ -55,6 +55,10 @@ fi
 
 case "$action" in
     build) cargo build --locked --release --bins ;;
+    c6-build)
+        cargo build --locked --release --no-default-features --features esp32c6 \
+            --target riscv32imac-unknown-none-elf
+        ;;
     smoke-build) cargo build --locked --release --bin smoke-test ;;
     smoke|app)
         binary=smoke-test

@@ -45,6 +45,7 @@ close the monitor; the firmware continues running on the board.
 Other commands:
 
 ```sh
+bash scripts/firmware.sh c6-build                  # build the app for ESP32-C6
 bash scripts/firmware.sh smoke-build             # build only the LED test
 bash scripts/firmware.sh monitor /dev/cu.usbmodem101  # monitor without flashing
 bash scripts/firmware.sh app /dev/cu.usbmodem101  # flash the original radio scaffold

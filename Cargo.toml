@@ -12,6 +12,7 @@ path = "./src/bin/main.rs"
 [[bin]]
 name = "smoke-test"
 path = "./src/bin/smoke-test.rs"
+required-features = ["esp32s3"]
 
 # To build for esp32c6
 # cargo build --no-default-features --features esp32c6 --target riscv32imac-unknown-none-elf
