@@ -7,10 +7,10 @@ cd "$project_dir"
 
 action="${1:-help}"
 case "$action" in
-    build|c6-build|smoke-build|smoke|app|monitor) ;;
+    build|c6-build|main-build|smoke-build|main|smoke|app|monitor) ;;
     *)
-        echo "Usage: $0 {build|c6-build|smoke-build|smoke|app|monitor} [serial-port]"
-        echo "smoke/app build, flash, and monitor; Ctrl+C exits the monitor."
+        echo "Usage: $0 {build|c6-build|main-build|smoke-build|main|smoke|monitor} [serial-port]"
+        echo "main/smoke build, flash, and monitor; Ctrl+C exits the monitor."
         exit 0
         ;;
 esac
@@ -59,10 +59,11 @@ case "$action" in
         cargo build --locked --release --no-default-features --features esp32c6 \
             --target riscv32imac-unknown-none-elf
         ;;
+    main-build) cargo build --locked --release --bin sdp27-leg-day ;;
     smoke-build) cargo build --locked --release --bin smoke-test ;;
-    smoke|app)
-        binary=smoke-test
-        if [[ "$action" == app ]]; then binary=sdp27-leg-day; fi
+    main|app|smoke)
+        binary=sdp27-leg-day
+        if [[ "$action" == smoke ]]; then binary=smoke-test; fi
         cargo build --locked --release --bin "$binary"
         exec espflash flash --chip esp32s3 --flash-size 16mb --monitor \
             "$@" "target/xtensa-esp32s3-none-elf/release/$binary"

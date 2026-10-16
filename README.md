@@ -46,14 +46,16 @@ Other commands:
 
 ```sh
 bash scripts/firmware.sh c6-build                  # build the app for ESP32-C6
-bash scripts/firmware.sh smoke-build             # build only the LED test
-bash scripts/firmware.sh monitor /dev/cu.usbmodem101  # monitor without flashing
-bash scripts/firmware.sh app /dev/cu.usbmodem101  # flash the original radio scaffold
+bash scripts/firmware.sh main-build                # build only main.rs for ESP32-S3
+bash scripts/firmware.sh smoke-build               # build only the LED test
+bash scripts/firmware.sh main /dev/cu.usbmodem101  # build, flash, and monitor main.rs
+bash scripts/firmware.sh smoke /dev/cu.usbmodem101 # build, flash, and monitor the LED test
+bash scripts/firmware.sh monitor /dev/cu.usbmodem101 # monitor without flashing
 ```
 
-`app` initializes Wi-Fi and BLE controllers and prints `Hello world!`, but does
-not yet connect to Wi-Fi, advertise BLE, acquire sensors, or send classifications.
-Only the smoke test has been run on hardware in the verification below.
+`main` (with `app` retained as a legacy alias) flashes the program in
+`src/bin/main.rs`. It starts the runtime and the S3's second core and prints
+`Hello world!`, but does not yet acquire sensors or send classifications.
 
 ## Matching host tools
 
