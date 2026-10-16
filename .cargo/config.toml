@@ -12,7 +12,7 @@ rustflags = ["-C", "link-arg=-nostartfiles","-C", "link-arg=-Wl,--no-warn-rwx-se
 
 [target.riscv32imac-unknown-none-elf]
 runner = "espflash flash --baud=921600 --monitor --chip esp32c6 --list-all-ports"
-rustflags = ["-C", "link-arg=-nostartfiles","-C", "link-arg=-Wl,--no-warn-rwx-segments", "-C", "force-frame-pointers"]
+rustflags = ["-C", "force-frame-pointers"]
 
 [build]
 # default to esp32s3

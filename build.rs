@@ -1,21 +1,24 @@
 fn main() {
-    linker_be_nice();
-    check_xtensa_linker_available();
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if target.starts_with("xtensa-") {
+        linker_be_nice();
+        check_xtensa_linker_available(&target);
+    }
+
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
 }
 
 #[cfg(unix)]
-fn check_xtensa_linker_available() {
+fn check_xtensa_linker_available(target: &str) {
     println!("cargo:rerun-if-env-changed=PATH");
 
-    let target = std::env::var("TARGET").unwrap_or_default();
     println!(
         "cargo:rerun-if-env-changed={}",
-        cargo_linker_env_var(&target)
+        cargo_linker_env_var(target)
     );
 
-    let linker = xtensa_linker(&target);
+    let linker = xtensa_linker(target);
 
     let error = match std::process::Command::new(&linker)
         .arg("--version")
@@ -40,7 +43,7 @@ fn check_xtensa_linker_available() {
 }
 
 #[cfg(not(unix))]
-fn check_xtensa_linker_available() {}
+fn check_xtensa_linker_available(_target: &str) {}
 
 #[cfg(unix)]
 fn xtensa_linker(target: &str) -> String {
