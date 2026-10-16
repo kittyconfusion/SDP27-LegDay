@@ -57,6 +57,17 @@ bash scripts/firmware.sh monitor /dev/cu.usbmodem101 # monitor without flashing
 `src/bin/main.rs`. It starts the runtime and the S3's second core and prints
 `Hello world!`, but does not yet acquire sensors or send classifications.
 
+The hardware-independent sensor-frame and rolling-window code lives in
+`crates/legday-core`. Run its host tests and synthetic window demonstration with:
+
+```sh
+bash scripts/core-demo.sh
+```
+
+See [the sensor and classifier pipeline](docs/sensor-pipeline.md) for the proposed
+28-feature data contract, buffering plan, recording format, and implementation
+sequence.
+
 ## Matching host tools
 
 The tested installation uses:
