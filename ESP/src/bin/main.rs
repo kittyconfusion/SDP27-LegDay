@@ -41,7 +41,7 @@ static CORE1_STACK: ConstStaticCell<Stack<8192>> = ConstStaticCell::new(Stack::n
 #[allow(clippy::large_stack_frames)]
 // alternative to the synchronous version, #[esp_hal::entry], and sets up a lot of stuff
 #[esp_rtos::main]
-async fn main(spawner: Spawner) -> ! {
+async fn main(_spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env(); // Makes log:: work
 
     println!("hello world");

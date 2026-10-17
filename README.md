@@ -1,9 +1,9 @@
 # Legasaurous Rex
 
-Senior design firmware for the Arduino Nano ESP32 (ESP32-S3). Use this repository
-as the shared firmware project. It uses Rust `no_std`, `esp-hal`, and Embassy /
-`esp-rtos`. The earlier local `SDP_2027` folder is an ESP-IDF reference snapshot;
-its APIs and build target differ from this repository.
+Senior design firmware and host tools for the Arduino Nano ESP32 (ESP32-S3). The
+root `Cargo.toml` defines the workspace, `ESP/` contains all ESP32-S3/ESP32-C6
+firmware, `crates/` contains portable Rust code, and `Scripts/` contains host-side
+tools. The firmware uses Rust `no_std`, `esp-hal`, and Embassy / `esp-rtos`.
 
 The primary target is the ESP32-S3. The main application also has an ESP32-C6
 feature configuration, available through `cargo build-c6` and `cargo run-c6`.
@@ -20,16 +20,16 @@ On Windows, use WSL and attach the board's USB device to WSL with
 [usbipd](https://learn.microsoft.com/en-us/windows/wsl/connect-usb). Install the
 Rust and Espressif tools inside that WSL environment.
 
-## First hardware test
+## Firmware and SD-card test
 
 From this repository on macOS or Linux:
 
 ```sh
-# Compile both programs without touching the board.
-bash scripts/firmware.sh build
+# Compile the S3 application and SD-card test without touching the board.
+bash ESP/scripts/firmware.sh build
 
-# Compile, flash, and monitor the basic LED test.
-bash scripts/firmware.sh smoke /dev/cu.usbmodem101
+# Compile, flash, and monitor the SD-card/button test.
+bash ESP/scripts/firmware.sh sd /dev/cu.usbmodem101
 ```
 
 The port above was verified on Tim's Mac on October 12, 2026; it may change after
@@ -37,23 +37,42 @@ reconnecting the board. Set `ESPFLASH_PORT`, pass the current port as the second
 argument, or omit the port to let espflash select it. Linux ports commonly look
 like `/dev/ttyACM0`. Use a USB data cable and close other serial monitors first.
 
-The smoke test prints `LegDay Rust smoke-test v1` and an increasing counter every
-250 ms while toggling the D13 LED on **ESP32 GPIO48**. It initializes neither the
-radio nor PSRAM. The LED should change state four times per second. Press `Ctrl+C` to
-close the monitor; the firmware continues running on the board.
+The SD-card test uses D13/GPIO48 for SPI clock, D12/GPIO47 for card-to-MCU data,
+D11/GPIO38 for MCU-to-card data, and D10/GPIO21 for chip select. Connect the
+breakout only to 3.3 V. A record button connects D7/GPIO10 to ground, and a
+category button connects D8/GPIO17 to ground. Both use internal pull-ups.
+
+The test mounts a FAT32 card, creates motion-category directories, and generates
+synthetic 72-byte `SensorFrame` values at 200 Hz. The category button changes the
+destination while idle. The record button writes the preceding one-second RAM
+window and then streams new frames; pressing it again flushes and closes the file.
+Press `Ctrl+C` to close the monitor; the firmware continues running on the board.
 
 Other commands:
 
 ```sh
-bash scripts/firmware.sh c6-build                  # build the app for ESP32-C6
-bash scripts/firmware.sh smoke-build             # build only the LED test
-bash scripts/firmware.sh monitor /dev/cu.usbmodem101  # monitor without flashing
-bash scripts/firmware.sh app /dev/cu.usbmodem101  # flash the original radio scaffold
+bash ESP/scripts/firmware.sh c6-build                  # build main for ESP32-C6
+bash ESP/scripts/firmware.sh main-build                # build main.rs for ESP32-S3
+bash ESP/scripts/firmware.sh sd-build                  # build the S3 SD-card test
+bash ESP/scripts/firmware.sh main /dev/cu.usbmodem101  # flash and monitor main
+bash ESP/scripts/firmware.sh sd /dev/cu.usbmodem101    # flash and monitor SD test
+bash ESP/scripts/firmware.sh monitor /dev/cu.usbmodem101 # monitor without flashing
 ```
 
-`app` initializes Wi-Fi and BLE controllers and prints `Hello world!`, but does
-not yet connect to Wi-Fi, advertise BLE, acquire sensors, or send classifications.
-Only the smoke test has been run on hardware in the verification below.
+`main` (with `app` retained as a legacy alias) flashes the program in
+`ESP/src/bin/main.rs`. It starts the runtime and the S3's second core and prints
+`Hello world!`, but does not yet acquire sensors or send classifications.
+
+The hardware-independent sensor-frame and rolling-window code lives in
+`crates/legday-core`. Run its host tests and synthetic window demonstration with:
+
+```sh
+bash Scripts/core-demo.sh
+```
+
+See [the sensor and classifier pipeline](docs/sensor-pipeline.md) for the proposed
+28-feature data contract, buffering plan, recording format, and implementation
+sequence.
 
 ## Matching host tools
 
@@ -91,12 +110,12 @@ this `no_std` target needs for linking. The build wrapper sources
 For another installation location, set `ESP_XTENSA_GCC_BIN` to its `bin` directory.
 An existing linker on `PATH` takes precedence; use the table to check its version.
 
-For manual Cargo commands, source the export file and ensure
-`xtensa-esp32s3-elf-gcc` is on `PATH`. Then:
+For manual firmware Cargo commands, enter `ESP`, source the export file, and
+ensure `xtensa-esp32s3-elf-gcc` is on `PATH`. Then:
 
 ```sh
 cargo build --locked --release --bins
-cargo run --locked --release --bin smoke-test
+cargo run --locked --release --bin sd-card-test
 ```
 
 `cargo run` uses the runner in `.cargo/config.toml`. The wrapper also sets the
@@ -113,8 +132,9 @@ Flash stores firmware and persistent data. SRAM and PSRAM hold working data;
 PSRAM is not extra flash and must be configured before use. Neither current
 program enables it. The app scaffold reserves two internal heap regions totaling
 139,280 bytes; that is its chosen heap allocation, not total physical RAM.
-The smoke test uses no dynamic heap. Hardware interrogation confirmed 16 MB flash;
-PSRAM capacity has not yet been probed or tested on this particular board.
+The SD-card test uses statically allocated recording buffers and no dynamic heap.
+Hardware interrogation confirmed 16 MB flash; PSRAM capacity has not yet been
+probed or tested on this particular board.
 
 ## Working together
 
