@@ -1,9 +1,7 @@
 {
   "rust-analyzer.cargo.allTargets": false,
+  "rust-analyzer.check.allTargets": false,
   "rust-analyzer.cargo.target": "xtensa-esp32s3-none-elf",
-  "rust-analyzer.server.extraEnv": {
-    "RUSTUP_TOOLCHAIN": "stable"
-  },
   "rust-analyzer.cargo.extraEnv": {
     "RUSTUP_TOOLCHAIN": "esp"
   },
@@ -11,5 +9,5 @@
     "editor.defaultFormatter": "rust-lang.rust-analyzer",
     "editor.formatOnSave": true,
     "editor.formatOnSaveMode": "file"
-  },
+  }
 }

@@ -2,15 +2,16 @@
 # Run from any directory. Keep machine-specific paths out of Cargo config.
 set -euo pipefail
 
-project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$project_dir"
+firmware_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+workspace_dir="$(cd -- "$firmware_dir/.." && pwd)"
+cd "$firmware_dir"
 
 action="${1:-help}"
 case "$action" in
-    build|c6-build|main-build|smoke-build|main|smoke|app|monitor) ;;
+    build|c6-build|main-build|sd-build|main|sd|app|monitor) ;;
     *)
-        echo "Usage: $0 {build|c6-build|main-build|smoke-build|main|smoke|monitor} [serial-port]"
-        echo "main/smoke build, flash, and monitor; Ctrl+C exits the monitor."
+        echo "Usage: $0 {build|c6-build|main-build|sd-build|main|sd|monitor} [serial-port]"
+        echo "main/sd build, flash, and monitor; Ctrl+C exits the monitor."
         exit 0
         ;;
 esac
@@ -60,13 +61,13 @@ case "$action" in
             --target riscv32imac-unknown-none-elf
         ;;
     main-build) cargo build --locked --release --bin sdp27-leg-day ;;
-    smoke-build) cargo build --locked --release --bin smoke-test ;;
-    main|app|smoke)
+    sd-build) cargo build --locked --release --bin sd-card-test ;;
+    main|app|sd)
         binary=sdp27-leg-day
-        if [[ "$action" == smoke ]]; then binary=smoke-test; fi
+        if [[ "$action" == sd ]]; then binary=sd-card-test; fi
         cargo build --locked --release --bin "$binary"
         exec espflash flash --chip esp32s3 --flash-size 16mb --monitor \
-            "$@" "target/xtensa-esp32s3-none-elf/release/$binary"
+            "$@" "$workspace_dir/target/xtensa-esp32s3-none-elf/release/$binary"
         ;;
     monitor)
         exec espflash monitor --chip esp32s3 "$@"

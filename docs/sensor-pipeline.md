@@ -124,14 +124,14 @@ it should know nothing about I2C, GPIO, SD cards, Wi-Fi, or Bluetooth.
 Run the hardware-independent tests and demonstration with:
 
 ```sh
-bash scripts/core-demo.sh
+bash Scripts/core-demo.sh
 ```
 
 Exercise the future recording format without hardware:
 
 ```sh
-python3 tools/sensor_frames.py generate /tmp/legday-synthetic.bin --samples 400
-python3 tools/sensor_frames.py decode /tmp/legday-synthetic.bin /tmp/legday-synthetic.csv
+python3 Scripts/sensor_frames.py generate /tmp/legday-synthetic.bin --samples 400
+python3 Scripts/sensor_frames.py decode /tmp/legday-synthetic.bin /tmp/legday-synthetic.csv
 ```
 
 ## References

@@ -5,6 +5,8 @@
 //! dependencies, so the same representation can be tested on a computer and
 //! compiled into ESP32-S3 or ESP32-C6 firmware.
 
+pub mod recording;
+
 pub const IMU_COUNT: usize = 4;
 pub const IMU_CHANNELS: usize = 6;
 pub const PRESSURE_COUNT: usize = 4;
@@ -131,7 +133,7 @@ pub struct WindowBuffer<const N: usize> {
 }
 
 impl<const N: usize> WindowBuffer<N> {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         assert!(N > 0, "window capacity must be nonzero");
         Self {
             frames: [SensorFrame::ZERO; N],
@@ -178,7 +180,7 @@ impl<const N: usize> Default for WindowBuffer<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
 
