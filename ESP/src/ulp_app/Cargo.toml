@@ -1,0 +1,12 @@
+[package]
+name = "hamstrings"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+#esp-lp-hal = { version = "0.3.0", features = ["esp32s3"] }
+panic-halt = "1.0.0"
+
+[[bin]]
+name = "hamstrings"
+path = "ulp_code.rs"

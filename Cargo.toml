@@ -1,7 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["ESP", "crates/legday-core"]
-default-members = ["ESP"]
+members = [
+    "ESP/src/main_app",
+    "ESP/src/ulp_app",
+    "crates/legday-core"]
+default-members = ["ESP/src/main_app"]
 
 [profile.dev]
 opt-level = "s"

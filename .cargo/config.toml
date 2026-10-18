@@ -1,11 +1,6 @@
 # Keep compilation settings in this file and user/runtime settings in `esp-config.toml`.
 include = ["esp-config.toml"]
 
-[env]
-# change this to increase/decrease logging verbosity
-# debug will provide copious amounts of information
-ESP_LOG = "info" #debug warn
-
 [target.xtensa-esp32s3-none-elf]
 runner = "espflash flash --baud=921600 --monitor --chip esp32s3 --list-all-ports"
 rustflags = ["-C", "link-arg=-nostartfiles","-C", "link-arg=-Wl,--no-warn-rwx-segments"]
@@ -14,14 +9,14 @@ rustflags = ["-C", "link-arg=-nostartfiles","-C", "link-arg=-Wl,--no-warn-rwx-se
 runner = "espflash flash --baud=921600 --monitor --chip esp32c6 --list-all-ports"
 rustflags = ["-C", "force-frame-pointers"]
 
-[build]
-# default to esp32s3
-target = "xtensa-esp32s3-none-elf"
-
 [unstable]
 build-std = ["alloc", "core"]
 
 [alias]
-# run with "cargo run-c6" and "cargo build-c6"
+# run with "cargo run-c6" and "cargo build-c6
 run-c6 = "run --no-default-features --features esp32c6 --target riscv32imac-unknown-none-elf"
 build-c6 = "build --no-default-features --features esp32c6 --target riscv32imac-unknown-none-elf"
+build-ulp = [
+    "build", "--release", "--package", "hamstrings", "--target", "riscv32imac-unknown-none-elf",
+    "--config", "target.riscv32imac-unknown-none-elf.rustflags=['-C', 'link-arg=--entry=main']"
+]

@@ -1,36 +1,35 @@
-// To build or run for esp32c6
-// "cargo build-c6" and "cargo run-c6"
-
 #![no_std]
 #![no_main]
-#![deny(clippy::mem_forget)] // Should not be used
-#![deny(clippy::large_stack_frames)] // General compiler error if allocate > 512kb
+#![deny(clippy::mem_forget)] // Should not be used so deny
+#![deny(clippy::large_stack_frames)] // General compiler error if allocate > 512kb at a time (main function given exemption)
+
+mod bin;
+
+#[cfg(feature = "esp32s3")]
+use bin::ulp_controller;
 
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
-// use esp_hal::load_lp_code;
 
-//#[cfg(feature = "esp32s3")]
-//use esp_hal::lp_core::UlpCore;
+#[cfg(feature = "esp32s3")]
+use esp_hal::lp_core::UlpCore;
 #[cfg(feature = "esp32s3")]
 use esp_hal::system::Stack;
 #[cfg(feature = "esp32s3")]
 use static_cell::ConstStaticCell;
 
-//#[cfg(feature = "esp32c6")]
-//use esp_hal::lp_core::LpCore;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
 use log;
 
-// Alternative to providing our own panic_handler upon fatal crash
-// should serial print stacktrace (backtrace? what's the difference) and function
+// Alternative to providing our own panic_handler
+// should print backtrace to serial upon fatal error
 use esp_backtrace as _;
 
 extern crate alloc;
 
-// This creates a default app-descriptor required by the esp-idf bootloader. Whatever that means.
+// Creates a default app-descriptor required by the esp-idf bootloader. aka makes things work right.
 esp_bootloader_esp_idf::esp_app_desc!();
 
 // Only need the Core 1 stack if the core actually exists
@@ -43,12 +42,6 @@ static CORE1_STACK: ConstStaticCell<Stack<8192>> = ConstStaticCell::new(Stack::n
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env(); // Makes log:: work
-
-    println!("hello world");
-    log::warn!("Warning!");
-    log::info!("For your consideration");
-    log::debug!("pi = 3.12");
-    log::error!("retry? yikes");
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -71,6 +64,9 @@ async fn main(_spawner: Spawner) -> ! {
 
     #[cfg(feature = "esp32s3")]
     {
+        let ulp_core = UlpCore::new(peripherals.ULP_RISCV_CORE);
+
+        log::info!("S3 initialized");
         esp_rtos::start_second_core(
             peripherals.CPU_CTRL,
             peripherals.FROM_CPU_INTR1,
@@ -81,10 +77,18 @@ async fn main(_spawner: Spawner) -> ! {
                 // and immediately doing nothing (except for background async tasks)
             },
         );
+        loop {
+            log::info!("");
+            Timer::after(Duration::from_secs(5)).await;
+        }
     }
-    loop {
-        log::info!("Hello world!");
-        Timer::after(Duration::from_secs(5)).await;
+    #[cfg(feature = "esp32c6")]
+    {
+        log::info!("C6 initialized");
+        loop {
+            log::info!("Hello world!");
+            Timer::after(Duration::from_secs(5)).await;
+        }
     }
 }
 

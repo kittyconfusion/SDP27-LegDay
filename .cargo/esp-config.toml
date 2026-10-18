@@ -1,3 +1,9 @@
-# Keep user/runtime configuration values in this file.
 [env]
-ESP_LOG="info"
+# change this to increase/decrease logging verbosity
+# debug will provide copious amounts of information
+ESP_LOG = "info" #debug warn
+
+# default build target
+[build]
+# target = riscv32imac-unknown-none-elf # esp32-c6
+target = "xtensa-esp32s3-none-elf" # esp32-s3

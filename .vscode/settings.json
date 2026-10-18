@@ -1,10 +1,14 @@
 {
   "rust-analyzer.cargo.allTargets": false,
-  "rust-analyzer.check.allTargets": false,
-  "rust-analyzer.cargo.target": "xtensa-esp32s3-none-elf",
+    "rust-analyzer.check.allTargets": false,
+    "rust-analyzer.cargo.target": "xtensa-esp32s3-none-elf",
+    // "rust-analyzer.cargo.target": "riscv32imac-unknown-none-elf", 
   "rust-analyzer.cargo.extraEnv": {
     "RUSTUP_TOOLCHAIN": "esp"
   },
+  "rust-analyzer.linkedProjects": [
+    "${workspaceFolder}/Cargo.toml"
+  ],
   "[rust]": {
     "editor.defaultFormatter": "rust-lang.rust-analyzer",
     "editor.formatOnSave": true,

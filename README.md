@@ -1,3 +1,19 @@
+# Team Leg Day's Most Fantastic Gait Detector
+## Senior Design Project 26-27 Team 4
+### UMass Amherst Electrical and Computer Engineering Senior Design Project
+
+This repository hosts code and assets for an automatic, real-time gait detector. The folder structure is as follows.
+
+**crates** contains helper library functions for main and test esp32 executables
+**docs** contains getting started help, general design information, and product specifications
+**ESP** holds the main esp32 executable code and related scripts
+**Scripts** consists of one-off processing routines and whatnot
+
+
+TODO: What does the remaining text do? Where/if should it be placed?
+
+
+
 # Legasaurous Rex
 
 Senior design firmware and host tools for the Arduino Nano ESP32 (ESP32-S3). The
@@ -157,12 +173,4 @@ See [the bring-up record](docs/bringup-2026-10-12.md) for the comparison of both
 folders and the observed hardware output.
 
 - [Rust on ESP Book](https://docs.espressif.com/projects/rust/book/)
-- [Espressif Rust documentation](https://docs.espressif.com/projects/rust/)
-- [ESP32-S3 datasheet](https://documentation.espressif.com/esp32-s3_datasheet_en.pdf)
-- [Arduino Nano ESP32 datasheet](https://docs.arduino.cc/resources/datasheets/ABX00083-datasheet.pdf)
-- [Rust Book](https://doc.rust-lang.org/book/)
-- [Board pinout](https://docs.arduino.cc/resources/pinouts/ABX00083-full-pinout.pdf)
-- [IMUs](https://www.adafruit.com/product/4554)
-- [I2C multiplexer](https://www.adafruit.com/product/2717)
-- [SD breakout](https://www.adafruit.com/product/4682)
-- [Force sensor](https://www.adafruit.com/product/5475)
+
