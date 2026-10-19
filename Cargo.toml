@@ -3,7 +3,8 @@ resolver = "3"
 members = [
     "crates/main_app",
     "crates/ulp_app",
-    "crates/legday-core"]
+    "crates/legday-core",
+    "crates/legday-classifier"]
 default-members = ["crates/main_app"]
 
 [profile.dev]

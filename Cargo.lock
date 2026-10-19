@@ -1642,6 +1642,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
+name = "legday-classifier"
+version = "0.1.0"
+dependencies = [
+ "legday-core",
+]
+
+[[package]]
 name = "legday-core"
 version = "0.1.0"
 
