@@ -671,6 +671,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "embedded-hal-nb"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fba4268c14288c828995299e59b12babdbe170f6c6d73731af1b4648142e8605"
+dependencies = [
+ "embedded-hal 1.0.0",
+ "nb 1.1.0",
+]
+
+[[package]]
 name = "embedded-io"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -802,7 +812,7 @@ dependencies = [
  "document-features",
  "enumset",
  "esp-config",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.5.3",
  "esp-sync",
  "linked_list_allocator",
  "rlsf",
@@ -816,7 +826,7 @@ checksum = "4fbfed00e884572d620a6958b13456fc2bb8ab75802b5adc8afc224f97cdebad"
 dependencies = [
  "document-features",
  "esp-config",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.5.3",
  "esp-println",
  "heapless 0.9.3",
  "riscv",
@@ -832,8 +842,8 @@ checksum = "ba0e487f6843419bb085d871f6e860da1bb8c267ce1c5db1051b83882e943054"
 dependencies = [
  "document-features",
  "esp-config",
- "esp-hal-procmacros",
- "esp-metadata-generated",
+ "esp-hal-procmacros 0.23.0",
+ "esp-metadata-generated 0.5.3",
  "esp-rom-sys",
  "esp-storage",
  "jiff",
@@ -849,7 +859,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fcd577a122ec917691f6820a3df54388ecebc750f071b060f5e83707bc415512"
 dependencies = [
  "document-features",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.5.3",
  "serde",
  "serde_yaml",
  "somni-expr",
@@ -882,8 +892,8 @@ dependencies = [
  "embedded-io-async 0.7.0",
  "enumset",
  "esp-config",
- "esp-hal-procmacros",
- "esp-metadata-generated",
+ "esp-hal-procmacros 0.23.0",
+ "esp-metadata-generated 0.5.3",
  "esp-riscv-rt",
  "esp-rom-sys",
  "esp-sync",
@@ -919,6 +929,20 @@ dependencies = [
 
 [[package]]
 name = "esp-hal-procmacros"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fd82a6506fb08d53a1086d165d92f085717aa9c59e67ac87a9e6f8acdcf6897"
+dependencies = [
+ "document-features",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "termcolor",
+]
+
+[[package]]
+name = "esp-hal-procmacros"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a8733fdeadc349ba1e4a345c7bfb74d195d8c98fd3be9d2c15bfd78601cbc44"
@@ -931,6 +955,28 @@ dependencies = [
  "syn 2.0.119",
  "termcolor",
 ]
+
+[[package]]
+name = "esp-lp-hal"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cc0625e0a29a8d5c05a8daf7799d4166e641fb8af52e591997a49ffe8eff964"
+dependencies = [
+ "cfg-if",
+ "document-features",
+ "embedded-hal 1.0.0",
+ "embedded-hal-nb",
+ "esp-hal-procmacros 0.20.0",
+ "esp-metadata-generated 0.2.0",
+ "esp32s3-ulp",
+ "riscv",
+]
+
+[[package]]
+name = "esp-metadata-generated"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b18b1787dd3adea642fb529dd83fe558a08ace365bbaede4643a8959992900f4"
 
 [[package]]
 name = "esp-metadata-generated"
@@ -948,7 +994,7 @@ dependencies = [
  "embassy-sync 0.8.0",
  "esp-config",
  "esp-hal",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.5.3",
  "esp-sync",
  "esp-wifi-sys-esp32c6",
  "esp-wifi-sys-esp32s3",
@@ -964,7 +1010,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebf772a41bc642b57399632aa06ab55391de35b2b8fcbb1b270d282fbd0fe5ff"
 dependencies = [
  "document-features",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.5.3",
  "esp-sync",
  "log",
  "portable-atomic",
@@ -991,8 +1037,8 @@ dependencies = [
  "esp-alloc",
  "esp-config",
  "esp-hal",
- "esp-hal-procmacros",
- "esp-metadata-generated",
+ "esp-hal-procmacros 0.23.0",
+ "esp-metadata-generated 0.5.3",
  "esp-phy",
  "esp-radio-rtos-driver",
  "esp-rom-sys",
@@ -1046,7 +1092,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e933ff78374b763b65998b64ad671b4890ed4ba13a80deff9f53afe95ede289d"
 dependencies = [
  "document-features",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.5.3",
  "esp32c6 0.24.0",
  "esp32s3 0.36.0",
 ]
@@ -1067,8 +1113,8 @@ dependencies = [
  "esp-alloc",
  "esp-config",
  "esp-hal",
- "esp-hal-procmacros",
- "esp-metadata-generated",
+ "esp-hal-procmacros 0.23.0",
+ "esp-metadata-generated 0.5.3",
  "esp-radio-rtos-driver",
  "esp-rom-sys",
  "esp-sync",
@@ -1086,8 +1132,8 @@ checksum = "6ef0e785f54e316f64a1e14a7a2f061a2ea0b038b284902ca71e1e1f5574cf47"
 dependencies = [
  "document-features",
  "esp-hal",
- "esp-hal-procmacros",
- "esp-metadata-generated",
+ "esp-hal-procmacros 0.23.0",
+ "esp-metadata-generated 0.5.3",
  "esp-rom-sys",
  "esp-sync",
  "esp32c6 0.24.0",
@@ -1104,7 +1150,7 @@ dependencies = [
  "embassy-sync 0.6.2",
  "embassy-sync 0.7.2",
  "embassy-sync 0.8.0",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.5.3",
  "riscv",
  "xtensa-lx",
 ]
@@ -1291,6 +1337,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp32s3-ulp"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae6d479079c506628d634d9f17865f2ea795b30b601bda43f2245049c15f164d"
+dependencies = [
+ "critical-section",
+ "vcell",
+]
+
+[[package]]
 name = "esp32s31"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1427,6 +1483,7 @@ dependencies = [
 name = "hamstrings"
 version = "0.1.0"
 dependencies = [
+ "esp-lp-hal",
  "panic-halt",
 ]
 

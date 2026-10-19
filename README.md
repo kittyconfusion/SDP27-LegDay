@@ -4,9 +4,8 @@
 
 This repository hosts code and assets for an automatic, real-time gait detector. The folder structure is as follows.
 
-**crates** contains helper library functions for main and test esp32 executables
+**crates** contains Rust code including the main esp32 code, tests, and a helper library
 **docs** contains getting started help, general design information, and product specifications
-**ESP** holds the main esp32 executable code and related scripts
 **Scripts** consists of one-off processing routines and whatnot
 
 

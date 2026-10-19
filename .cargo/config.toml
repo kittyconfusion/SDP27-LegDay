@@ -17,6 +17,6 @@ build-std = ["alloc", "core"]
 run-c6 = "run --no-default-features --features esp32c6 --target riscv32imac-unknown-none-elf"
 build-c6 = "build --no-default-features --features esp32c6 --target riscv32imac-unknown-none-elf"
 build-ulp = [
-    "build", "--release", "--package", "hamstrings", "--target", "riscv32imac-unknown-none-elf",
+    "build", "--release", "--package", "hamstrings", "--features", "esp32s3", "--target", "riscv32imac-unknown-none-elf",
     "--config", "target.riscv32imac-unknown-none-elf.rustflags=['-C', 'link-arg=--entry=main']"
 ]

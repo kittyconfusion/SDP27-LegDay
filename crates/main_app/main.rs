@@ -38,7 +38,6 @@ static CORE1_STACK: ConstStaticCell<Stack<8192>> = ConstStaticCell::new(Stack::n
 
 // suppress compiler complaining about memory allocation
 #[allow(clippy::large_stack_frames)]
-// alternative to the synchronous version, #[esp_hal::entry], and sets up a lot of stuff
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env(); // Makes log:: work
@@ -64,7 +63,8 @@ async fn main(_spawner: Spawner) -> ! {
 
     #[cfg(feature = "esp32s3")]
     {
-        let ulp_core = UlpCore::new(peripherals.ULP_RISCV_CORE);
+        let mut ulp_core = UlpCore::new(peripherals.ULP_RISCV_CORE);
+        ulp_controller::init(&mut ulp_core);
 
         log::info!("S3 initialized");
         esp_rtos::start_second_core(
@@ -95,5 +95,3 @@ async fn main(_spawner: Spawner) -> ! {
 // create chip specific code with
 // if cfg!(feature = "esp32s3")  // chooses whether to run at run-time
 // #[cfg(feature = "esp32s3")]   // chooses whether to include (at all) at compile-time
-// for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/main/examples
-// initial generator parameters: -o esp32s3 -o esp32s3-wroom-1-octal-psram -o unstable-hal -o alloc -o embassy -o wifi -o ble-trouble -o log -o vscode -o esp
