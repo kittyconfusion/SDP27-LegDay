@@ -8,10 +8,10 @@ cd "$firmware_dir"
 
 action="${1:-help}"
 case "$action" in
-    build|c6-build|main-build|sd-build|main|sd|app|monitor) ;;
+    build|c6-build|main-build|sd-build|imu-build|main|sd|imu|app|monitor) ;;
     *)
-        echo "Usage: $0 {build|c6-build|main-build|sd-build|main|sd|monitor} [serial-port]"
-        echo "main/sd build, flash, and monitor; Ctrl+C exits the monitor."
+        echo "Usage: $0 {build|c6-build|main-build|sd-build|imu-build|main|sd|imu|monitor} [serial-port]"
+        echo "main/sd/imu build, flash, and monitor; Ctrl+C exits the monitor."
         exit 0
         ;;
 esac
@@ -62,9 +62,11 @@ case "$action" in
         ;;
     main-build) cargo build --locked --release --bin sdp27-leg-day ;;
     sd-build) cargo build --locked --release --bin sd-card-test ;;
-    main|app|sd)
+    imu-build) cargo build --locked --release --bin imu-sensor-test ;;
+    main|app|sd|imu)
         binary=sdp27-leg-day
         if [[ "$action" == sd ]]; then binary=sd-card-test; fi
+        if [[ "$action" == imu ]]; then binary=imu-sensor-test; fi
         cargo build --locked --release --bin "$binary"
         exec espflash flash --chip esp32s3 --flash-size 16mb --monitor \
             "$@" "$workspace_dir/target/xtensa-esp32s3-none-elf/release/$binary"

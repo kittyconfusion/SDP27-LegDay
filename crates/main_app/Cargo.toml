@@ -14,6 +14,11 @@ name = "sd-card-test"
 path = "bin/sd-card-test.rs"
 required-features = ["esp32s3"]
 
+[[bin]]
+name = "imu-sensor-test"
+path = "bin/imu-sensor-test.rs"
+required-features = ["esp32s3"]
+
 [features]
 default = ["esp32s3"]
 esp32s3 = [
@@ -37,6 +42,8 @@ esp32c6 = [
 
 [dependencies]
 legday-core = { path = "../legday-core" }
+legday-classifier = { path = "../legday-classifier" }
+legday-icm20948 = { path = "../legday-icm20948" }
 
 esp-backtrace = { version = "0.20", features = ["panic-handler", "println"] }
 esp-hal = { version = "~1.2.2", features = ["log-04", "unstable"] }

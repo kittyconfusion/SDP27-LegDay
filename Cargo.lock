@@ -1653,6 +1653,13 @@ name = "legday-core"
 version = "0.1.0"
 
 [[package]]
+name = "legday-icm20948"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal 1.0.0",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2023,7 +2030,9 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "heapless 0.9.3",
+ "legday-classifier",
  "legday-core",
+ "legday-icm20948",
  "log",
  "smoltcp 0.14.0",
  "static_cell",

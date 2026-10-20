@@ -1,0 +1,18 @@
+[package]
+name = "legday-icm20948"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+description = "Minimal ICM-20948 driver (raw accel/gyro, FIFO, and DMP Quat6) over embedded-hal I2C"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["dmp"]
+# Embeds the ~14 kB InvenSense DMP firmware image and the DMP control code.
+dmp = []
+
+[dependencies]
+embedded-hal = "1.0.0"

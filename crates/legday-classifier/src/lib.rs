@@ -5,6 +5,7 @@
 //! Keep this crate free of ESP-specific APIs so the same algorithm can be
 //! tested on recorded data on a computer and linked into embedded firmware.
 
+pub mod fusion;
 pub mod prototype;
 pub mod quaternion;
 
