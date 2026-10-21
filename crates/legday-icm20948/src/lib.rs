@@ -17,6 +17,20 @@
 //! - **DMP** (module [`dmp`], feature `dmp`): the IMU's Digital Motion
 //!   Processor runs InvenSense firmware that emits raw accel, raw gyro, and a
 //!   6-axis quaternion per sample through the same FIFO.
+//!
+//! # Register access model
+//!
+//! The ICM-20948 has four register "banks" selected through register 0x7F.
+//! [`Icm20948::set_bank`] remembers the current bank so repeated accesses in
+//! the same bank cost one I2C transaction, not two. Every public method names
+//! the bank and register it touches, so each call can be checked against the
+//! datasheet directly.
+//!
+//! # Units
+//!
+//! Accel and gyro values are raw signed 16-bit counts. Convert with
+//! [`AccelRange::lsb_per_g`] and [`GyroRange::lsb_per_dps`]; the DMP path
+//! uses 4 g and 2000 dps, so 8192 counts = 1 g and 16.4 counts = 1 deg/s.
 
 pub mod regs;
 

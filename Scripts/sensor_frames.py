@@ -10,6 +10,13 @@ Two frame layouts exist:
 
 The layout is picked from the file extension and can be forced with
 ``--frame-bytes 72`` or ``--frame-bytes 120``.
+
+Commands:
+
+* ``generate``  write synthetic 72-byte frames (for exercising the SD test)
+* ``decode``    binary -> CSV, one row per frame, quaternions also as floats
+* ``summary``   rate, timing jitter, sequence gaps, overflow flags, ranges
+* ``plot``      PNG of accel / gyro / quaternion traces (needs matplotlib)
 """
 
 from __future__ import annotations
@@ -174,6 +181,85 @@ def summarize(input_path: Path, frame: struct.Struct) -> None:
             )
 
 
+
+def plot(input_path: Path, output_path: Path, frame: struct.Struct, max_seconds: float | None) -> None:
+    """Draw accel, gyro, quaternion, and a gravity cross-check as a PNG.
+
+    matplotlib is imported here rather than at the top so that generate,
+    decode, and summary keep working on a machine without it.
+    """
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")  # headless: write a file, never open a window
+        import matplotlib.pyplot as plt
+    except ImportError:
+        raise SystemExit("plot needs matplotlib: python3 -m pip install matplotlib")
+
+    fused = frame is FUSED_FRAME
+    frames = list(iter_frames(input_path, frame))
+    if not frames:
+        raise SystemExit("file holds no frames")
+
+    t0 = frames[0][0]
+    seconds = [(values[0] - t0) / 1e6 for values in frames]
+    if max_seconds is not None:
+        keep = sum(1 for s in seconds if s <= max_seconds)
+        frames, seconds = frames[:keep], seconds[:keep]
+
+    # IMU 0 raw counts converted to physical units for readability.
+    accel_g = [[values[5 + axis] / 8192.0 for values in frames] for axis in range(3)]
+    gyro_dps = [[values[8 + axis] / 16.4 for values in frames] for axis in range(3)]
+
+    rows = 4 if fused else 2
+    figure, axes = plt.subplots(rows, 1, figsize=(12, 2.6 * rows), sharex=True)
+    axes[0].set_title(f"{input_path.name}: {len(frames)} frames, IMU 0")
+    for axis, label in enumerate("xyz"):
+        axes[0].plot(seconds, accel_g[axis], label=f"a{label}", linewidth=0.8)
+        axes[1].plot(seconds, gyro_dps[axis], label=f"g{label}", linewidth=0.8)
+    axes[0].set_ylabel("accel [g]")
+    axes[1].set_ylabel("gyro [deg/s]")
+
+    if fused:
+        # Quaternion components, with w rebuilt from the unit-length rule.
+        quats = []
+        for values in frames:
+            x, y, z = (component / Q30 for component in values[33:36])
+            quats.append((reconstruct_w(x, y, z), x, y, z))
+        for axis, label in enumerate("wxyz"):
+            axes[2].plot(seconds, [q[axis] for q in quats], label=f"q{label}", linewidth=0.8)
+        axes[2].set_ylabel("quat6")
+
+        # Cross-check: the quaternion's idea of "down" in the sensor frame
+        # should match the accelerometer direction whenever the sensor is
+        # not accelerating. Large gaps mean motion, not error.
+        down = [
+            (2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y))
+            for (w, x, y, z) in quats
+        ]
+        norms = [
+            math.sqrt(sum(accel_g[axis][index] ** 2 for axis in range(3))) or 1.0
+            for index in range(len(frames))
+        ]
+        for axis, label in enumerate("xyz"):
+            axes[3].plot(seconds, [d[axis] for d in down], label=f"down {label} (quat)", linewidth=0.8)
+            axes[3].plot(
+                seconds,
+                [accel_g[axis][index] / norms[index] for index in range(len(frames))],
+                label=f"accel {label} / |a|",
+                linewidth=0.6,
+                linestyle="--",
+            )
+        axes[3].set_ylabel("gravity dir")
+
+    for axis in axes:
+        axis.legend(loc="upper right", fontsize="x-small", ncol=3)
+        axis.grid(True, alpha=0.3)
+    axes[-1].set_xlabel("seconds")
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=120)
+    print(f"plotted {len(frames)} frames to {output_path}")
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--frame-bytes", type=int, choices=(72, 120), help="override layout detection")
@@ -190,11 +276,18 @@ def main() -> None:
     summary_parser = subparsers.add_parser("summary", help="print rate, gaps, and channel ranges")
     summary_parser.add_argument("input", type=Path)
 
+    plot_parser = subparsers.add_parser("plot", help="save a PNG of accel, gyro, and quaternion traces")
+    plot_parser.add_argument("input", type=Path)
+    plot_parser.add_argument("output", type=Path)
+    plot_parser.add_argument("--max-seconds", type=float, help="only plot the first N seconds")
+
     args = parser.parse_args()
     if args.command == "generate":
         generate(args.output, args.samples)
     elif args.command == "decode":
         decode(args.input, args.output, frame_struct(args.input, args.frame_bytes))
+    elif args.command == "plot":
+        plot(args.input, args.output, frame_struct(args.input, args.frame_bytes), args.max_seconds)
     else:
         summarize(args.input, frame_struct(args.input, args.frame_bytes))
 

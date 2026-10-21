@@ -14,7 +14,8 @@ anything.
 | `crates/legday-core/src/fused.rs` | `FusedFrame` = the existing 72-byte `SensorFrame` + 4 x 12-byte Quat6 = **120 bytes**; `FusedWindowBuffer`, `FusedFrameBatch`, status-flag bit definitions. |
 | `crates/legday-classifier/src/fusion.rs` | Madgwick 6-axis filter in `f32` with a software inverse square root (no `libm`), used as the fallback when the DMP is unavailable and as a live cross-check. |
 | `crates/main_app/bin/imu-sensor-test.rs` | The test firmware: DMP first, software fusion fallback, 225-frame window, RECORD/CATEGORY buttons writing `.Q6B` files. |
-| `Scripts/sensor_frames.py` | Now decodes 72- and 120-byte files and has a `summary` command (rate, gaps, overflow flags, channel ranges, last quaternion). |
+| `Scripts/sensor_frames.py` | Now decodes 72- and 120-byte files and has `summary` (rate, gaps, overflow flags, channel ranges) and `plot` (PNG of accel, gyro, quaternion and a gravity cross-check) commands. |
+| `crates/legday-core/src/clock.rs` | `SampleClock`: reconstructs smooth per-sample timestamps for samples drained from a FIFO in bursts, measuring the IMU's real rate along the way. |
 | `Scripts/serial_capture.py` | Stdlib-only serial logger for capturing board output to a file without an interactive monitor. |
 | `crates/scripts/firmware.sh` | New `imu` and `imu-build` actions. |
 
@@ -30,6 +31,32 @@ anything.
 
 The Adafruit ICM-20948 breakout answers at 0x69 by default; the firmware probes
 0x69 then 0x68 so a SparkFun board with the ADR jumper closed also works.
+
+## Pressure sensors
+
+The MF01A is a force-sensing resistor: its resistance falls from megaohms
+(no load) to a few kiloohms (full load). The ADC needs a voltage, so wire each
+sensor as the top half of a divider:
+
+```text
+3V3 ── MF01A ──┬── A0 (GPIO1)      A0..A3 = GPIO1..4 = ADC1 channels 0..3
+               │
+              10 kΩ
+               │
+              GND
+```
+
+Unloaded, A0 sits near 0 V; loaded, it rises toward 3.3 V. 10 kΩ is a
+starting point; a larger resistor gives more sensitivity at light loads, a
+smaller one delays saturation at heavy loads, so choose it on the bench
+with a foot on the sensor. Use ADC1 pins only (A0-A3): ADC2 is shared with
+Wi-Fi on the ESP32-S3 and cannot be read while the radio is on.
+
+The firmware reads all four channels once per loop pass with 11 dB
+attenuation (12-bit counts, ~4095 at 3.3 V, non-linear above ~2.5 V) and
+stores them in every frame's `pressure_adc`. `CONNECTED_PRESSURE_MASK` in
+`imu-sensor-test.rs` sets `valid_pressure_mask`; it is 0 until a divider is
+wired, so set bit 0 after wiring A0. Unconnected pins read floating noise.
 
 ## Running it
 
@@ -49,6 +76,16 @@ latest raw accel/gyro, the DMP quaternion, the Madgwick quaternion, and each
 one's predicted gravity ("down") direction in the sensor frame next to the
 normalised accelerometer. At rest the two down vectors should agree with the
 accelerometer; that is the quickest sanity check for the quaternion convention.
+
+The `plot` command writes a PNG with four panels: accel in g, gyro in
+deg/s, the quaternion components, and the quaternion's predicted gravity
+direction overlaid on the normalised accelerometer. When the sensor is not
+accelerating, the solid and dashed lines of the last panel coincide; that is
+the quickest visual check that the DMP output is believable.
+
+```sh
+python3 Scripts/sensor_frames.py plot /Volumes/SDCARD/WALK/S0000000.Q6B walk0.png
+```
 
 ## Frame layout (120 bytes, little-endian)
 
@@ -86,9 +123,13 @@ keeps sampling during a stall and the loop drains the backlog afterwards. In
 raw mode a sample is 12 bytes (about 1.5 s of buffer); in DMP mode a packet is
 about 40 bytes (about 0.45 s), which still covers normal SD latency.
 
-Timestamps for drained samples are reconstructed as
-`drain_time - (n - 1 - i) * period`, hence status bit 3. The absolute jitter
-is bounded by one loop pass; the relative spacing is the IMU's own clock.
+Timestamps for drained samples are reconstructed by `SampleClock`
+(`legday-core`), hence status bit 3. A drain tells the MCU only that its
+samples were taken *before* now, so the clock keeps regular spacing at the
+measured IMU rate and only pulls an estimate earlier when a drain proves it
+must be. On the bench this reduced timestamp jitter from about 4 ms (naive
+back-calculation) to under 1 ms, and it reports the true rate (228.5 Hz:
+the IMU crystal runs 1.5 % fast).
 
 ## Sample rate: 225 Hz, not 200 Hz
 
@@ -121,6 +162,78 @@ contract before training data is collected.
   cheaper (about 0.35 ms per sample).
 - Licence: the DMP image is InvenSense firmware redistributed under SparkFun's
   MIT-licensed library; see `crates/legday-icm20948/README.md`.
+
+## Checking a recording without a reference instrument
+
+`EX_MicroSD_Data/Q6B/s0000001.Q6B` (18 s: still, shaken, then rotated in
+free space) was checked three ways, none of which need external equipment:
+
+| Check | Result |
+| --- | --- |
+| Rotation rate implied by consecutive quaternions vs. gyro magnitude, over 3,711 samples above 1 rad/s | median ratio 1.000 |
+| Quaternion-predicted gravity vs. accelerometer direction while still | about 2 degrees apart |
+| Quaternion vector length | never exceeds 1 (max 0.9999998) |
+
+The accelerometer clipped at ±4 g during shaking and the gyro at ±2000 dps
+during the fastest flicks. The DMP firmware constants assume those ranges;
+running at the shank can exceed 4 g, so an 8 g or 16 g DMP configuration
+(different `ACC_SCALE` constants) is worth evaluating before data collection.
+
+## Four IMUs: bus topology and timing
+
+The ICM-20948 has two I2C addresses (AD0 low = 0x68, high = 0x69), so two
+IMUs share a bus with no multiplexer; that is the "daisy chain" option, one
+bus per leg. A TCA9548A multiplexer is only needed for more than two on one
+bus, and it adds a channel-select write before every access.
+
+Bus time is the constraint, not CPU time. At 400 kHz one byte costs about
+22 µs, and reading the FIFO count plus one DMP packet is about 0.9 ms:
+
+| Topology | Bus busy per 4.44 ms sample period | Verdict |
+| --- | --- | --- |
+| 4 IMUs, DMP, one bus (mux or chain) | ~3.6 ms (81 %) | too tight; any stall drops samples |
+| 4 IMUs, DMP, two buses (two per leg) | ~1.8 ms each (40 %) | workable if the two buses run concurrently |
+| 4 IMUs, raw FIFO, one bus | ~1.3 ms (30 %) | fine |
+| 4 IMUs, DMP, SPI at 7 MHz | ~0.05 ms each | trivially fine |
+
+"Concurrently" matters: the S3 has two I2C controllers, but the blocking
+driver used here waits for each transfer. The production firmware should use
+the async driver (or DMA) so both buses transfer at once, or put the IMUs on
+SPI, which the breakouts support. Either way, one combined frame of all four
+IMUs plus the four ADC channels every 5 ms is achievable; the DMP path just
+needs the bus split.
+
+Each IMU runs on its own crystal (1-2 % apart), so the four FIFOs drift
+relative to each other. Pairing samples into one frame needs either a shared
+FSYNC pulse (one GPIO trace to every breakout; worth adding to the PCB) or
+matching by the reconstructed timestamps, which `SampleClock` provides.
+
+## Yaw drift and the magnetometer
+
+Quat6 integrates the gyro for heading, so yaw drifts. Two things limit it:
+the DMP estimates and removes gyro bias on the fly (its gyro accuracy flag
+reaches 3 after a few seconds at rest), and the project never needs absolute
+heading. Knee flexion is the *relative* rotation between thigh and shank, so
+a common drift cancels and only the difference between two IMUs' drift
+remains. Options, cheapest first:
+
+1. **Re-zero at a known posture.** When the classifier (or the pressure
+   sensors) say the person is standing still, redefine the relative
+   orientation as "straight". That removes accumulated drift without any
+   extra sensor.
+2. **Use the joint as a constraint.** A knee is close to a hinge, and the
+   hinge axis can be found from the two gyros alone (Seel et al., 2014,
+   "IMU-based joint angle measurement for gait analysis"). Projecting both
+   orientations onto that axis gives a drift-free flexion angle.
+3. **Magnetometer, occasionally.** The DMP can emit the raw compass (header
+   bit 0x2000) or Quat9 (bit 0x0400) in the *same* packets as Quat6; no
+   firmware swap is needed, only extra bits in `DATA_OUT_CTL1`, and the
+   I2C-master setup for the AK09916 is already done in `dmp_initialize`.
+   Enable it at a low rate, accept a reading only when the field magnitude
+   is near the local value (about 50 µT) and steady, and use it to correct
+   heading every few minutes. Indoors near steel or motors it will be
+   rejected most of the time, which is fine for an occasional correction.
+   This path is wired up but was not tested on this branch.
 
 ## Measured on hardware (October 19, 2026, Tim's Nano ESP32 + Adafruit ICM-20948)
 

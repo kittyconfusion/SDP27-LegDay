@@ -12,12 +12,31 @@
 //! imu.reset(&mut delay)?;
 //! imu.dmp_initialize(&mut delay, 4, true)?;          // 225 Hz, verify firmware
 //! imu.dmp_enable_outputs(DmpOutputs::ALL)?;          // raw accel, raw gyro, Quat6
-//! imu.dmp_set_odr(mem::ODR_QUAT6, mem::ODR_CNTR_QUAT6, 0)?;
-//! imu.dmp_set_odr(mem::ODR_ACCEL, mem::ODR_CNTR_ACCEL, 0)?;
-//! imu.dmp_set_odr(mem::ODR_GYRO, mem::ODR_CNTR_GYRO, 0)?;
+//! imu.dmp_set_all_odrs(0)?;                           // every sensor in every packet
 //! imu.dmp_start()?;
 //! loop { let status = imu.dmp_read_packets(&mut packets)?; /* ... */ }
 //! ```
+//!
+//! # Packet anatomy
+//!
+//! With accel, gyro and Quat6 enabled, each FIFO packet looks like this
+//! (all fields big-endian):
+//!
+//! ```text
+//!  2 B header   0xC848 = accel | gyro | gyro-calibr | quat6 | header2
+//!  2 B header2  which optional accuracy words follow (only when they change)
+//!  6 B accel    x, y, z  int16 raw counts
+//! 12 B gyro     x, y, z  int16 raw counts, then x, y, z int16 bias estimate
+//! 12 B quat6    x, y, z  int32 Q30 (w = sqrt(1 - x² - y² - z²) >= 0)
+//!  2 B accel accuracy 0..3   } present only when header2 says so
+//!  2 B gyro accuracy  0..3   }
+//!  2 B footer   DMP cycle counter
+//! ```
+//!
+//! Packets are 36 or 40 bytes, one per sample period, so they are parsed by
+//! reading the header and skipping exactly the fields it announces. The
+//! parser lives in [`parse_packet`]; [`Icm20948::dmp_read_packets`] feeds it
+//! from the FIFO in chunks and carries a cut-off packet to the next call.
 
 use crate::regs::*;
 use crate::{Error, Icm20948};
@@ -507,6 +526,14 @@ impl<I2C: I2c> Icm20948<I2C> {
         self.dmp_write_u16(counter_register, 0)?;
         self.set_low_power(true)?;
         Ok(())
+    }
+
+    /// Sets accel, gyro and Quat6 to the same interval in one call
+    /// (0 = every DMP cycle, so all three appear in every packet).
+    pub fn dmp_set_all_odrs(&mut self, interval: u16) -> Result<(), Error<I2C::Error>> {
+        self.dmp_set_odr(mem::ODR_ACCEL, mem::ODR_CNTR_ACCEL, interval)?;
+        self.dmp_set_odr(mem::ODR_GYRO, mem::ODR_CNTR_GYRO, interval)?;
+        self.dmp_set_odr(mem::ODR_QUAT6, mem::ODR_CNTR_QUAT6, interval)
     }
 
     /// Enables the FIFO and DMP, then resets both so packets start clean.

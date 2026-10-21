@@ -5,6 +5,7 @@
 //! dependencies, so the same representation can be tested on a computer and
 //! compiled into ESP32-S3 or ESP32-C6 firmware.
 
+pub mod clock;
 pub mod fused;
 pub mod recording;
 
