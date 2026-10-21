@@ -34,9 +34,26 @@ pub mod status {
     pub const TIMESTAMP_RECONSTRUCTED: u16 = 0x0008;
     /// DMP accelerometer calibration accuracy (0-3) occupies bits 4-5.
     pub const ACCEL_ACCURACY_SHIFT: u16 = 4;
-    /// DMP gyroscope calibration accuracy (0-3) occupies bits 6-7.
+    /// Gyroscope calibration level (0-3) occupies bits 6-7: the DMP's own
+    /// accuracy in DMP mode, or the S3's `GyroBias` level in software mode.
     pub const GYRO_ACCURACY_SHIFT: u16 = 6;
     pub const ACCURACY_MASK: u16 = 0x0003;
+
+    /// Accelerometer full-scale setting (0 = ±2 g, 1 = ±4 g, 2 = ±8 g,
+    /// 3 = ±16 g) occupies bits 8-9. Only meaningful if `RANGES_RECORDED`.
+    pub const ACCEL_RANGE_SHIFT: u16 = 8;
+    /// Gyroscope full-scale setting (0 = ±250, 1 = ±500, 2 = ±1000,
+    /// 3 = ±2000 dps) occupies bits 10-11. Only meaningful if `RANGES_RECORDED`.
+    pub const GYRO_RANGE_SHIFT: u16 = 10;
+    pub const RANGE_MASK: u16 = 0x0003;
+    /// Bits 8-11 hold the sensor ranges. Files recorded before this bit
+    /// existed were all ±4 g and ±2000 dps.
+    pub const RANGES_RECORDED: u16 = 0x1000;
+
+    /// The IMUs had drifted out of step and samples were dropped from the
+    /// one that ran ahead, just before this frame.
+    pub const IMU_REALIGNED: u16 = 0x2000;
+
     pub const SYNTHETIC: u16 = 0x8000;
 }
 

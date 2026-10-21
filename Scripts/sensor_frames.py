@@ -42,7 +42,25 @@ STATUS_ORIENTATION_MASK = 0x0003
 STATUS_ORIENTATION_NAMES = {0: "none", 1: "dmp", 2: "software", 3: "?"}
 STATUS_FIFO_OVERFLOW = 0x0004
 STATUS_TIMESTAMP_RECONSTRUCTED = 0x0008
+STATUS_RANGES_RECORDED = 0x1000
+STATUS_IMU_REALIGNED = 0x2000
 STATUS_SYNTHETIC = 0x8000
+
+# Counts per unit for each full-scale code stored in status bits 8-9 (accel)
+# and 10-11 (gyro).
+ACCEL_LSB_PER_G = (16_384.0, 8_192.0, 4_096.0, 2_048.0)  # ±2, ±4, ±8, ±16 g
+GYRO_LSB_PER_DPS = (131.0, 65.5, 32.8, 16.4)  # ±250, ±500, ±1000, ±2000 dps
+
+
+def sensor_scales(flags: int) -> tuple[float, float]:
+    """Return (accel counts per g, gyro counts per deg/s) for a frame.
+
+    Newer files record the ranges in the status flags. Files from before
+    that (all DMP recordings) were always ±4 g and ±2000 dps.
+    """
+    if not flags & STATUS_RANGES_RECORDED:
+        return ACCEL_LSB_PER_G[1], GYRO_LSB_PER_DPS[3]
+    return ACCEL_LSB_PER_G[(flags >> 8) & 3], GYRO_LSB_PER_DPS[(flags >> 10) & 3]
 
 
 def frame_struct(path: Path, frame_bytes: int | None) -> struct.Struct:
@@ -162,6 +180,11 @@ def summarize(input_path: Path, frame: struct.Struct) -> None:
     print(f"overflow flags:  {overflow}")
     print(f"synthetic:       {sum(1 for f in flags if f & STATUS_SYNTHETIC)}")
     print(f"orientation src: {sources}")
+    print(f"IMU realigned:   {sum(1 for f in flags if f & STATUS_IMU_REALIGNED)}")
+    lsb_per_g, lsb_per_dps = sensor_scales(flags[0])
+    accel_range = (2, 4, 8, 16)[ACCEL_LSB_PER_G.index(lsb_per_g)]
+    gyro_range = (250, 500, 1000, 2000)[GYRO_LSB_PER_DPS.index(lsb_per_dps)]
+    print(f"sensor ranges:   ±{accel_range} g, ±{gyro_range} dps")
     for imu in range(IMU_COUNT):
         if not any(values[2] & (1 << imu) for values in frames):
             continue
@@ -208,8 +231,9 @@ def plot(input_path: Path, output_path: Path, frame: struct.Struct, max_seconds:
         frames, seconds = frames[:keep], seconds[:keep]
 
     # IMU 0 raw counts converted to physical units for readability.
-    accel_g = [[values[5 + axis] / 8192.0 for values in frames] for axis in range(3)]
-    gyro_dps = [[values[8 + axis] / 16.4 for values in frames] for axis in range(3)]
+    lsb_per_g, lsb_per_dps = sensor_scales(frames[0][4])
+    accel_g = [[values[5 + axis] / lsb_per_g for values in frames] for axis in range(3)]
+    gyro_dps = [[values[8 + axis] / lsb_per_dps for values in frames] for axis in range(3)]
 
     rows = 4 if fused else 2
     figure, axes = plt.subplots(rows, 1, figsize=(12, 2.6 * rows), sharex=True)

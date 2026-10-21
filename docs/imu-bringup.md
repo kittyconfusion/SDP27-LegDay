@@ -209,6 +209,56 @@ relative to each other. Pairing samples into one frame needs either a shared
 FSYNC pulse (one GPIO trace to every breakout; worth adding to the PCB) or
 matching by the reconstructed timestamps, which `SampleClock` provides.
 
+## Raw pipeline (current firmware, October 21, 2026)
+
+After the diagnostics showed DMP over I2C cannot meet the 4-IMU budget, the
+test firmware dropped the DMP. It now reads raw accel + gyro from every IMU's
+FIFO and computes each quaternion on the S3 (`crates/main_app/bin/imu_pipeline.rs`).
+The diagnostics (`x`) still run the DMP for comparison.
+
+Each sample period (4.44 ms) the main loop runs three stages:
+
+1. **Acquire**: drain every IMU's FIFO back to back over I2C into a
+   per-IMU queue, with reconstructed timestamps.
+2. **Pressure**: read the four ADC channels (33-95 µs).
+3. **Assemble**: for each instant every IMU has a sample for, correct each
+   gyro's bias, update each IMU's quaternion, and pack everything into one
+   120-byte frame in the one-second window.
+
+All bus work happens before any maths, so moving the bus stage to async
+I2C, SPI with DMA, or the second core later does not change the structure.
+IMUs are kept in step by pairing the oldest queued sample from each; an IMU
+whose crystal runs ahead by more than 3 samples has its surplus dropped and
+the next frame is flagged `IMU_REALIGNED`. Draining is scheduled once per
+sample period: polling faster only finds empty FIFOs, and on the bench it
+had wasted about 25 % of the bus.
+
+What replaced the DMP's built-in features:
+
+| DMP feature | Replacement on the S3 |
+| --- | --- |
+| Quaternion (Quat6) | Madgwick filter per IMU, 10-12 µs per frame including the items below |
+| Gyro bias calibration | `GyroBias`: learns the offset whenever the IMU is still; level 3 after ~3 s at rest (DMP: 2-10 s). The bias survives restarts and can be saved and restored across sleep |
+| Gating of accelerations | `accel_trust`: the accelerometer's pull on orientation fades out as its magnitude leaves 1 g, so heel strikes do not tilt the estimate |
+| Fixed ±4 g / ±2000 dps | Configurable; now ±16 g / ±2000 dps so impacts do not clip |
+| Knows its own sample rate | Integration uses each IMU's measured period (4,372 µs on the bench, 1.6 % faster than nominal) |
+
+Frames now record the sensor ranges in `status_flags` bits 8-12;
+`Scripts/sensor_frames.py` scales by them, and treats older files as ±4 g.
+
+Measured live with one IMU:
+
+| | DMP over I2C (before) | Raw over I2C (now) |
+| --- | --- | --- |
+| Bus time per frame | 1,041 µs | 512 µs |
+| Bus busy | 23 % | 11.7 % |
+| Longest stall survived | 125 ms | 1,200 ms |
+| Recording, 9 s | no lost frames | no lost frames, 228 Hz |
+
+Projected to four IMUs, raw is about 46 % of one I2C bus or 23 % each on
+two buses. That gives a new frame every 4.44 ms, but the worst sample age
+(5.5-6.5 ms) only drops under 5 ms on SPI.
+
 ## Diagnostics: measured bus, latency and wake costs
 
 `crates/main_app/bin/imu_diag.rs` measures what the four-IMU decision depends
