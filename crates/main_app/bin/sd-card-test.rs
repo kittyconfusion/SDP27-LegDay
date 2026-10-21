@@ -16,10 +16,10 @@ use esp_hal::{
 };
 use esp_println::println;
 use heapless::String;
-use legday_core::{
+use legday_core::lib_recording::{
     Imu6Raw, SAMPLE_RATE_HZ, SensorFrame, WINDOW_SAMPLES, WindowBuffer,
-    recording::{FrameBatch, MotionCategory},
 };
+use legday_core::recording::{FrameBatch, MotionCategory};
 use static_cell::ConstStaticCell;
 
 use esp_backtrace as _;

@@ -1,4 +1,4 @@
-use crate::{FRAME_WIRE_BYTES, SensorFrame};
+use crate::lib_recording::{FRAME_WIRE_BYTES, SensorFrame};
 
 pub const FRAMES_PER_SD_BATCH: usize = 64;
 pub const SD_BATCH_BYTES: usize = FRAMES_PER_SD_BATCH * FRAME_WIRE_BYTES;

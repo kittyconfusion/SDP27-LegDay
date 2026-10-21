@@ -7,3 +7,17 @@ publish = false
 
 [lib]
 path = "src/lib.rs"
+
+[features]
+default = ["esp32s3"]
+esp32s3 = [
+    "esp-hal/esp32s3",
+]
+esp32c6 = [
+    "esp-hal/esp32c6",
+]
+
+[dependencies]
+
+esp-hal = { version = "~1.2.2", features = ["log-04", "unstable"] }
+embedded-sdmmc = "0.10.0"
