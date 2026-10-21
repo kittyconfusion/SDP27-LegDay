@@ -25,22 +25,26 @@ impl WindowFeatures {
 
         for frame_index in 0..window.len() {
             let frame = window.get(frame_index)?;
+
             frame.write_features_i32(&mut current);
 
             for feature_index in 0..FEATURE_COUNT {
                 sums[feature_index] += i64::from(current[feature_index]);
+
                 if frame_index > 0 {
                     let change =
                         i64::from(current[feature_index]) - i64::from(previous[feature_index]);
                     absolute_changes[feature_index] += change.unsigned_abs();
                 }
             }
+
             previous = current;
         }
 
         let sample_count = window.len() as i64;
         let change_count = (window.len() - 1) as u64;
         let mut values = [0_i32; WINDOW_FEATURES];
+
         for feature_index in 0..FEATURE_COUNT {
             values[feature_index] = (sums[feature_index] / sample_count) as i32;
             values[FEATURE_COUNT + feature_index] =
@@ -72,6 +76,7 @@ impl<const CLASSES: usize, const FEATURES: usize> PrototypeClassifier<CLASSES, F
     pub const fn new() -> Self {
         assert!(CLASSES > 0, "classifier must contain at least one class");
         assert!(FEATURES > 0, "classifier must contain at least one feature");
+
         Self {
             sums: [[0; FEATURES]; CLASSES],
             counts: [0; CLASSES],
@@ -84,6 +89,7 @@ impl<const CLASSES: usize, const FEATURES: usize> PrototypeClassifier<CLASSES, F
         let Some(count) = self.counts.get_mut(class_index) else {
             return false;
         };
+
         if *count == u32::MAX {
             return false;
         }
@@ -91,6 +97,7 @@ impl<const CLASSES: usize, const FEATURES: usize> PrototypeClassifier<CLASSES, F
         for (sum, feature) in self.sums[class_index].iter_mut().zip(features) {
             *sum += i64::from(*feature);
         }
+
         *count += 1;
         true
     }
@@ -109,11 +116,13 @@ impl<const CLASSES: usize, const FEATURES: usize> PrototypeClassifier<CLASSES, F
 
         for class_index in 0..CLASSES {
             let count = self.counts[class_index];
+
             if count == 0 {
                 continue;
             }
 
             let mut squared_distance = 0_u128;
+
             for (sum, feature) in self.sums[class_index].iter().zip(features) {
                 let centroid = *sum / i64::from(count);
                 let difference = i128::from(*feature) - i128::from(centroid);
@@ -169,11 +178,13 @@ mod tests {
         window.push(frame(2, 30));
 
         let features = WindowFeatures::from_window(&window).unwrap();
+
         assert!(
             features.values[..FEATURE_COUNT]
                 .iter()
                 .all(|value| *value == 20)
         );
+
         assert!(
             features.values[FEATURE_COUNT..]
                 .iter()
@@ -184,6 +195,7 @@ mod tests {
     #[test]
     fn learns_streaming_class_centroids() {
         let mut model = PrototypeClassifier::<2, 2>::new();
+
         assert!(model.observe(0, &[0, 2]));
         assert!(model.observe(0, &[2, 4]));
         assert!(model.observe(1, &[100, 102]));

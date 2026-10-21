@@ -15,11 +15,14 @@ pub fn inv_sqrt(x: f32) -> f32 {
     if x <= 0.0 || !x.is_finite() {
         return 0.0;
     }
+
     let half = 0.5 * x;
     let mut y = f32::from_bits(0x5f37_59df - (x.to_bits() >> 1));
+
     for _ in 0..3 {
         y *= 1.5 - half * y * y;
     }
+
     y
 }
 
@@ -37,6 +40,7 @@ pub fn q30_to_f32(value: i32) -> f32 {
 
 pub fn f32_to_q30(value: f32) -> i32 {
     let scaled = value * Q30_ONE;
+
     if scaled >= i32::MAX as f32 {
         i32::MAX
     } else if scaled <= i32::MIN as f32 {
@@ -96,6 +100,7 @@ impl ImuScale {
 
     pub fn gyro_rad_s(&self, raw: [i16; 3]) -> [f32; 3] {
         let k = PI / 180.0 / self.gyro_lsb_per_dps;
+
         [raw[0] as f32 * k, raw[1] as f32 * k, raw[2] as f32 * k]
     }
 }
@@ -128,25 +133,31 @@ impl Madgwick {
     /// seconds converging from identity. Yaw is left at zero.
     pub fn reset_to_gravity(&mut self, accel: [f32; 3]) {
         let norm_sq = accel[0] * accel[0] + accel[1] * accel[1] + accel[2] * accel[2];
+
         if norm_sq <= 0.0 {
             self.reset();
             return;
         }
+
         let recip = inv_sqrt(norm_sq);
         let [ax, ay, az] = [accel[0] * recip, accel[1] * recip, accel[2] * recip];
+
         // Quaternion rotating the measured down vector onto +Z:
         // (1 + a.z, a x z) with z = (0, 0, 1), then normalised.
         let mut q = [1.0 + az, ay, -ax, 0.0];
         let q_norm_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+
         if q_norm_sq < 1e-8 {
             // Exactly upside down: any 180-degree turn about a horizontal axis.
             q = [0.0, 1.0, 0.0, 0.0];
         } else {
             let recip = inv_sqrt(q_norm_sq);
+
             for value in &mut q {
                 *value *= recip;
             }
         }
+
         self.q = q;
     }
 
@@ -168,6 +179,7 @@ impl Madgwick {
     /// DMP-style Q30 vector part with implied non-negative `w`.
     pub fn quat6_q30(&self) -> [i32; 3] {
         let q = self.quaternion_positive_w();
+
         [f32_to_q30(q[1]), f32_to_q30(q[2]), f32_to_q30(q[3])]
     }
 
@@ -193,6 +205,7 @@ impl Madgwick {
         let mut q_dot3 = 0.5 * (q0 * gz + q1 * gy - q2 * gx);
 
         let accel_norm_sq = ax * ax + ay * ay + az * az;
+
         if accel_norm_sq > 0.0 {
             let recip = inv_sqrt(accel_norm_sq);
             ax *= recip;
@@ -218,13 +231,16 @@ impl Madgwick {
                 + eight_q1 * q1q1
                 + eight_q1 * q2q2
                 + four_q1 * az;
+
             let mut s2 = 4.0 * q0q0 * q2 + two_q0 * ax + four_q2 * q3q3 - two_q3 * ay - four_q2
                 + eight_q2 * q1q1
                 + eight_q2 * q2q2
                 + four_q2 * az;
+
             let mut s3 = 4.0 * q1q1 * q3 - two_q1 * ax + 4.0 * q2q2 * q3 - two_q2 * ay;
 
             let step_norm_sq = s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3;
+
             if step_norm_sq > 0.0 && beta > 0.0 {
                 let recip = inv_sqrt(step_norm_sq);
                 s0 *= recip;
@@ -244,10 +260,13 @@ impl Madgwick {
             q2 + q_dot2 * dt,
             q3 + q_dot3 * dt,
         ];
+
         let recip = inv_sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+
         for value in &mut q {
             *value *= recip;
         }
+
         self.q = q;
     }
 }
@@ -273,6 +292,7 @@ const ACCEL_TRUST_BAND_G: f32 = 0.25;
 pub fn accel_trust(accel_g: [f32; 3]) -> f32 {
     let magnitude =
         sqrt(accel_g[0] * accel_g[0] + accel_g[1] * accel_g[1] + accel_g[2] * accel_g[2]);
+
     let deviation = (magnitude - 1.0).abs();
 
     (1.0 - deviation / ACCEL_TRUST_BAND_G).clamp(0.0, 1.0)
@@ -360,6 +380,7 @@ impl GyroBias {
             f32::from(gyro_counts[1]),
             f32::from(gyro_counts[2]),
         ];
+
         let residual = [
             gyro[0] - self.bias[0],
             gyro[1] - self.bias[1],
@@ -369,9 +390,11 @@ impl GyroBias {
         // Stillness: gravity alone on the accelerometer, little rotation.
         let accel_magnitude =
             sqrt(accel_g[0] * accel_g[0] + accel_g[1] * accel_g[1] + accel_g[2] * accel_g[2]);
+
         let rotation_dps =
             sqrt(residual[0] * residual[0] + residual[1] * residual[1] + residual[2] * residual[2])
                 / self.lsb_per_dps;
+
         let still = (accel_magnitude - 1.0).abs() < STILL_ACCEL_TOLERANCE_G
             && rotation_dps < STILL_GYRO_LIMIT_DPS;
 
@@ -384,7 +407,9 @@ impl GyroBias {
         if self.still_run >= STILL_SAMPLES_TO_START {
             // Running average at first, so the first second of rest gives a
             // good estimate quickly; then a slow rate that tracks drift.
+
             self.learned = self.learned.saturating_add(1);
+
             let rate = (1.0 / self.learned as f32).max(SLOW_LEARNING_RATE);
 
             for axis in 0..3 {
@@ -410,6 +435,7 @@ mod tests {
             let expected = 1.0 / value.sqrt();
             assert!((inv_sqrt(value) - expected).abs() <= expected * 2e-6);
         }
+
         assert_eq!(inv_sqrt(0.0), 0.0);
     }
 
@@ -426,16 +452,21 @@ mod tests {
     fn filter_settles_on_gravity_when_tilted() {
         // Sensor rolled 90 degrees about X: gravity appears along +Y.
         let mut filter = Madgwick::new(0.5);
+
         for _ in 0..4_000 {
             filter.update([0.0; 3], [0.0, 1.0, 0.0], 1.0 / 225.0);
         }
+
         let down = down_in_body(filter.quaternion());
+
         assert!(down[1].abs() > 0.99, "down vector {down:?}");
         assert!(
             down[0].abs() < 0.05 && down[2].abs() < 0.05,
             "down vector {down:?}"
         );
+
         let q = filter.quaternion_positive_w();
+
         assert!(q[0] >= 0.0);
     }
 
@@ -449,9 +480,12 @@ mod tests {
             [0.0, 0.0, 1.0],
         ] {
             let mut filter = Madgwick::default();
+
             filter.reset_to_gravity(accel);
+
             let down = down_in_body(filter.quaternion());
             let norm = (accel[0] * accel[0] + accel[1] * accel[1] + accel[2] * accel[2]).sqrt();
+
             for axis in 0..3 {
                 assert!(
                     (down[axis] - accel[axis] / norm).abs() < 1e-5,
@@ -473,9 +507,13 @@ mod tests {
     fn zero_gain_is_pure_gyro_integration() {
         // With no accelerometer trust, a gravity vector that disagrees with
         // the orientation must not move it.
+
         let mut filter = Madgwick::new(0.5);
+
         filter.update_with_gain([0.0; 3], [1.0, 0.0, 0.0], 0.01, 0.0);
+
         let q = filter.quaternion();
+
         assert!(
             (q[0] - 1.0).abs() < 1e-5 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0,
             "{q:?}"
@@ -491,30 +529,36 @@ mod tests {
         for _ in 0..1_000 {
             bias.correct([2_000, 0, 0], [0.0, 0.0, 2.0]);
         }
+
         assert_eq!(bias.level(), 0);
         assert_eq!(bias.bias_counts(), [0.0; 3]);
 
         // Rest: constant offset with a little noise. Learned to level 3.
         for sample in 0..600 {
             let noise = (sample % 5) as i16 - 2;
+
             bias.correct(
                 [offset[0] + noise, offset[1] - noise, offset[2]],
                 [0.0, 0.0, 1.0],
             );
         }
+
         assert_eq!(bias.level(), 3);
+
         for axis in 0..3 {
             assert!((bias.bias_counts()[axis] - f32::from(offset[axis])).abs() < 1.0);
         }
 
         // Once learned, a still reading comes back corrected to about zero.
         let corrected = bias.correct(offset, [0.0, 0.0, 1.0]);
+
         assert!(corrected.iter().all(|value| value.abs() < 1.0));
     }
 
     #[test]
     fn identity_orientation_sees_gravity_on_z() {
         let filter = Madgwick::default();
+
         assert_eq!(down_in_body(filter.quaternion()), [0.0, 0.0, 1.0]);
         assert_eq!(filter.quat6_q30(), [0, 0, 0]);
     }
