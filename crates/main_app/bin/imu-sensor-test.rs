@@ -37,7 +37,8 @@
 //! | SD CLK / MISO / MOSI / CS  | D13/D12/D11/D10 | 48/47/38/21 |
 //! | RECORD button to GND       | D7              | 10          |
 //! | CATEGORY button to GND     | D8              | 17          |
-//! | DIAG button to GND         | D9              | 18          |
+//! | DIAG button to GND         | D6              | 9           |
+//! | SD card detect (DET)       | D9              | 18 (unused) |
 //!
 //! A second IMU on the same Qwiic chain needs its ADR jumper bridged (address
 //! 0x68); it is detected at boot and fills frame slot 1.
@@ -605,7 +606,7 @@ fn main() -> ! {
     println!("LegDay IMU bring-up test (branch tim/testing-memory-and-sensors)");
     println!("I2C: A4/GPIO11 SDA, A5/GPIO12 SCL @ 400 kHz | ADC: A0-A3 pressure");
     println!("SPI: D13/GPIO48 CLK, D12/GPIO47 SO, D11/GPIO38 SI, D10/GPIO21 CS");
-    println!("Buttons: D7/GPIO10 RECORD, D8/GPIO17 CATEGORY, D9/GPIO18 DIAG (all to GND)");
+    println!("Buttons: D7/GPIO10 RECORD, D8/GPIO17 CATEGORY, D6/GPIO9 DIAG (all to GND)");
     println!(
         "Frame: {} bytes fused ({} raw + {} quat), window {} frames = {} bytes",
         FUSED_FRAME_WIRE_BYTES,
@@ -759,8 +760,10 @@ fn main() -> ! {
         InputConfig::default().with_pull(Pull::Up),
     );
 
+    // DIAG is on D6: D9 carries the SD breakout's card-detect (DET) line,
+    // which is grounded whenever no card is inserted and would read as a press.
     let diag_pin = Input::new(
-        peripherals.GPIO18,
+        peripherals.GPIO9,
         InputConfig::default().with_pull(Pull::Up),
     );
 

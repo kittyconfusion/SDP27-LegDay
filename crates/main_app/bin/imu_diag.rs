@@ -1,6 +1,6 @@
 //! # Bus, latency and wake-cost diagnostics
 //!
-//! Triggered by the DIAG button (D9 / GPIO18 to GND) or the `x` serial key.
+//! Triggered by the DIAG button (D6 / GPIO9 to GND) or the `x` serial key.
 //! It takes about a minute, prints a report, and then normal streaming
 //! resumes. **Leave the IMU still on the bench while it runs**: one step times
 //! the DMP's gyro calibration, which only converges at rest.

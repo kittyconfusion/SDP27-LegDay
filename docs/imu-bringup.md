@@ -28,7 +28,8 @@ anything.
 | SD CLK / MISO / MOSI / CS | D13 / D12 / D11 / D10 | 48 / 47 / 38 / 21 |
 | RECORD button to GND | D7 | 10 |
 | CATEGORY button to GND | D8 | 17 |
-| DIAG button to GND (optional) | D9 | 18 |
+| DIAG button to GND (optional) | D6 | 9 |
+| SD card detect (DET), not used yet | D9 | 18 |
 
 The Adafruit ICM-20948 breakout answers at 0x69 by default; the firmware probes
 0x69 then 0x68 so a SparkFun board with the ADR jumper closed also works.
@@ -262,7 +263,7 @@ two buses. That gives a new frame every 4.44 ms, but the worst sample age
 ## Diagnostics: measured bus, latency and wake costs
 
 `crates/main_app/bin/imu_diag.rs` measures what the four-IMU decision depends
-on. Trigger it with a button from **D9 / GPIO18 to GND** or the `x` key; it
+on. Trigger it with a button from **D6 / GPIO9 to GND** or the `x` key; it
 runs about 45 s (keep the IMU still) and then normal streaming resumes. Save
 the report with `python3 Scripts/serial_capture.py <port> 60 diag.log --send x@3`.
 
