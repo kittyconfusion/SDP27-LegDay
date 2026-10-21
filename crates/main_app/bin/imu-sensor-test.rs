@@ -37,12 +37,14 @@
 //! | SD CLK / MISO / MOSI / CS  | D13/D12/D11/D10 | 48/47/38/21 |
 //! | RECORD button to GND       | D7              | 10          |
 //! | CATEGORY button to GND     | D8              | 17          |
+//! | DIAG button to GND         | D9              | 18          |
 //!
 //! ## Serial commands (type into the monitor)
 //!
 //! `r` record start/stop · `c` next category · `m` switch DMP/software ·
 //! `d` hex-dump the newest frame · `p` pause draining 2 s (measures FIFO
-//! depth) · `h` help.
+//! depth) · `x` run the bus/latency/wake diagnostics (see `imu_diag.rs`) ·
+//! `h` help.
 //!
 //! ## How to read this file
 //!
@@ -90,6 +92,9 @@ use legday_icm20948::{
 use static_cell::ConstStaticCell;
 
 use esp_backtrace as _;
+
+/// Bus, latency and wake-cost measurements (DIAG button or `x`).
+mod imu_diag;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -151,6 +156,9 @@ static BATCH: ConstStaticCell<FusedFrameBatch> = ConstStaticCell::new(FusedFrame
 // ---------------------------------------------------------------------------------------------
 // SD-card plumbing
 // ---------------------------------------------------------------------------------------------
+
+/// The IMU driver on the blocking I2C bus, shared with the diagnostics module.
+type Imu = Icm20948<I2c<'static, Blocking>>;
 
 /// The SD card as seen by `embedded-sdmmc`: an SPI bus with a chip-select pin.
 type SdBlockDevice = SdCard<ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, Delay>, Delay>;
@@ -236,6 +244,7 @@ enum Action {
     ToggleMode,
     DumpFrame,
     Pause,
+    Diagnostics,
     Help,
 }
 
@@ -276,6 +285,16 @@ impl PressureInputs {
     }
 }
 
+/// Advances a periodic deadline by one period. If the loop was blocked for
+/// longer than a period (diagnostics, a mode switch), the deadline jumps to
+/// one period from now instead of firing once per missed period to catch up.
+fn next_deadline(deadline: Instant, period: Duration) -> Instant {
+    let next = deadline + period;
+    let now = Instant::now();
+
+    if next < now { now + period } else { next }
+}
+
 /// Microseconds since boot.
 fn now_us() -> u64 {
     Instant::now().duration_since_epoch().as_micros()
@@ -283,7 +302,7 @@ fn now_us() -> u64 {
 
 fn print_help() {
     println!(
-        "Serial commands: r=record start/stop, c=next category, m=switch DMP/software, d=dump newest frame, p=pause 2 s (FIFO depth), h=help"
+        "Serial commands: r=record start/stop, c=next category, m=switch DMP/software, d=dump newest frame, p=pause 2 s (FIFO depth), x=diagnostics, h=help"
     );
 }
 
@@ -752,7 +771,7 @@ fn main() -> ! {
     .with_sda(peripherals.GPIO11)
     .with_scl(peripherals.GPIO12);
 
-    let mut imu = Icm20948::new(i2c, legday_icm20948::I2C_ADDR_AD0_HIGH);
+    let mut imu: Imu = Icm20948::new(i2c, legday_icm20948::I2C_ADDR_AD0_HIGH);
 
     'probe: loop {
         for address in [
@@ -878,13 +897,20 @@ fn main() -> ! {
         InputConfig::default().with_pull(Pull::Up),
     );
 
+    let diag_pin = Input::new(
+        peripherals.GPIO18,
+        InputConfig::default().with_pull(Pull::Up),
+    );
+
     let mut record_button = DebouncedButton::new();
     let mut category_button = DebouncedButton::new();
+    let mut diag_button = DebouncedButton::new();
     let mut category = MotionCategory::Walk;
 
     // -------------------------------- Loop state --------------------------------------------
     let window = WINDOW.take();
     let batch = BATCH.take();
+    let mut diag_buffers = imu_diag::Buffers::take(); // taken once so diagnostics can rerun
     let scale = ImuScale::ICM20948_4G_2000DPS;
     let mut madgwick = Madgwick::new(MADGWICK_BETA);
     let mut madgwick_seeded = false; // first sample initialises the filter from gravity
@@ -1034,10 +1060,14 @@ fn main() -> ! {
         // ===================== 2. Collect input: buttons every 5 ms, serial keys always ===================
 
         if Instant::now() >= next_button_poll {
-            next_button_poll += BUTTON_PERIOD;
+            next_button_poll = next_deadline(next_button_poll, BUTTON_PERIOD);
 
             if category_button.update(category_pin.is_low()) {
                 let _ = actions.push(Action::NextCategory);
+            }
+
+            if diag_button.update(diag_pin.is_low()) {
+                let _ = actions.push(Action::Diagnostics);
             }
 
             if record_button.update(record_pin.is_low()) {
@@ -1052,6 +1082,7 @@ fn main() -> ! {
                 b'm' => Some(Action::ToggleMode),
                 b'd' => Some(Action::DumpFrame),
                 b'p' => Some(Action::Pause),
+                b'x' => Some(Action::Diagnostics),
                 b'h' | b'?' => Some(Action::Help),
                 _ => None,
             };
@@ -1088,26 +1119,43 @@ fn main() -> ! {
                     println!("Selected /{}", category.directory());
                 }
 
-                Action::ToggleMode if recorder.is_active() => {
-                    println!("MODE change ignored while recording")
+                Action::ToggleMode | Action::Diagnostics if recorder.is_active() => {
+                    println!("MODE change / DIAGNOSTICS ignored while recording")
                 }
 
-                Action::ToggleMode => {
-                    // Stop the current stream, restart in the other mode, and
-                    // forget history that was produced under the old mode.
-
-                    println!("Switching acquisition mode...");
+                Action::ToggleMode | Action::Diagnostics => {
+                    // Both take over the IMU: the mode switch restarts it in
+                    // the other mode, the diagnostics run their own tests and
+                    // then hand it back in the same mode. Either way, history
+                    // produced before the change is discarded afterwards.
 
                     let _ = match mode {
                         AcquisitionMode::Dmp => imu.dmp_stop(),
                         AcquisitionMode::RawFifo => imu.stop_raw_fifo(),
                     };
 
+                    let next_mode = if action == Action::Diagnostics {
+                        imu_diag::run(
+                            &mut imu,
+                            &mut delay,
+                            &mut diag_buffers,
+                            &mut pressure,
+                            period_us,
+                        );
+                        mode
+                    } else {
+                        println!("Switching acquisition mode...");
+                        match mode {
+                            AcquisitionMode::Dmp => AcquisitionMode::RawFifo,
+                            AcquisitionMode::RawFifo => AcquisitionMode::Dmp,
+                        }
+                    };
+
                     mode = start_acquisition(
                         &mut imu,
                         &mut delay,
                         &imu_config,
-                        mode == AcquisitionMode::RawFifo,
+                        next_mode == AcquisitionMode::Dmp,
                     );
 
                     window.clear();
@@ -1137,7 +1185,7 @@ fn main() -> ! {
 
         // ======================= 5. Status line once per second ========================================
         if Instant::now() >= next_status {
-            next_status += STATUS_PERIOD;
+            next_status = next_deadline(next_status, STATUS_PERIOD);
 
             let latest = window.latest().copied().unwrap_or(FusedFrame::ZERO);
             let accel = latest.raw.imus[0].accel;

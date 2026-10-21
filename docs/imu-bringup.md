@@ -28,6 +28,7 @@ anything.
 | SD CLK / MISO / MOSI / CS | D13 / D12 / D11 / D10 | 48 / 47 / 38 / 21 |
 | RECORD button to GND | D7 | 10 |
 | CATEGORY button to GND | D8 | 17 |
+| DIAG button to GND (optional) | D9 | 18 |
 
 The Adafruit ICM-20948 breakout answers at 0x69 by default; the firmware probes
 0x69 then 0x68 so a SparkFun board with the ADR jumper closed also works.
@@ -207,6 +208,52 @@ Each IMU runs on its own crystal (1-2 % apart), so the four FIFOs drift
 relative to each other. Pairing samples into one frame needs either a shared
 FSYNC pulse (one GPIO trace to every breakout; worth adding to the PCB) or
 matching by the reconstructed timestamps, which `SampleClock` provides.
+
+## Diagnostics: measured bus, latency and wake costs
+
+`crates/main_app/bin/imu_diag.rs` measures what the four-IMU decision depends
+on. Trigger it with a button from **D9 / GPIO18 to GND** or the `x` key; it
+runs about 45 s (keep the IMU still) and then normal streaming resumes. Save
+the report with `python3 Scripts/serial_capture.py <port> 60 diag.log --send x@3`.
+
+Results from Tim's bench, October 21, 2026 (two runs, agreeing within 1 %):
+
+| Measurement | DMP | Raw |
+| --- | --- | --- |
+| Bytes per sample | 34 | 12 |
+| Bus time per sample, drained every period | 1,041 µs | 511 µs |
+| Same, with an emulated second IMU on the bus | 2,069 µs | 1,022 µs |
+| Longest stall survived without losing samples | 125 ms | 1,200 ms |
+| Sleep 2 s, wake to first sample | 38 ms, firmware retained | 37 ms |
+
+I2C at 400 kHz costs 89 µs per transaction plus 23.7 µs per byte, and every
+drain is two transactions (FIFO count, then data). The fixed part is most of
+the raw-mode cost, which is why batching helps raw more than DMP.
+
+Projected to four IMUs, draining every 4.44 ms period:
+
+| Layout | Path | Bus busy per period | Worst sample age | Verdict |
+| --- | --- | --- | --- | --- |
+| 1 I2C bus (mux or 2 addresses) | DMP | 4.1 ms (93 %) | 8.6 ms | fails |
+| | raw | 2.0 ms (46 %) | 6.5 ms | ok |
+| 2 I2C buses x 2, concurrent | DMP | 2.1 ms (47 %) | 6.5 ms | ok |
+| | raw | 1.0 ms (23 %) | 5.5 ms | ok |
+| 2 I2C buses x 2, blocking driver | DMP | 4.1 ms | 8.6 ms | fails |
+| SPI 7 MHz x 4 (calculated) | DMP | 0.21 ms (5 %) | 4.7 ms | ok |
+| | raw | 0.11 ms (3 %) | 4.6 ms | ok |
+
+"Worst sample age" is the drain interval plus the bus time, the oldest a
+sample can be when it reaches RAM. At 225 Hz the interval alone is 4.44 ms, so
+staying under 5 ms needs less than 0.56 ms of bus time per period; only SPI
+gets there. The SPI rows assume 5 µs of driver overhead per transaction;
+even at 20 µs they stay under 0.4 ms.
+
+Other measurements: Madgwick fusion 3.4 µs per update (0.3 % of one core for
+four IMUs), DMP firmware load 486 ms per IMU over I2C (984 ms with
+verification), DMP gyro calibration 2-10 s at rest, four pressure ADC reads
+32 µs, and the prototype classifier 2.2 ms for features plus 0.3 ms to predict.
+SD writes while recording took up to 50 ms, already 40 % of the DMP's stall
+budget.
 
 ## Yaw drift and the magnetometer
 
