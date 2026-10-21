@@ -29,14 +29,14 @@
 //!
 //! ## Wiring (Arduino Nano ESP32 labels)
 //!
-//! | Signal                     | Pin | GPIO |
-//! |----------------------------|-----|------|
-//! | IMU SDA (Qwiic blue)       | A4  | 11   |
-//! | IMU SCL (Qwiic yellow)     | A5  | 12   |
-//! | Pressure dividers 0..3     | A0-A3 | 1-4 |
+//! | Signal                     | Pin             | GPIO        |
+//! |----------------------------|-----------------|-------------|
+//! | IMU SDA (Qwiic blue)       | A4              | 11          |
+//! | IMU SCL (Qwiic yellow)     | A5              | 12          |
+//! | Pressure dividers 0..3     | A0-A3           | 1-4         |
 //! | SD CLK / MISO / MOSI / CS  | D13/D12/D11/D10 | 48/47/38/21 |
-//! | RECORD button to GND       | D7  | 10   |
-//! | CATEGORY button to GND     | D8  | 17   |
+//! | RECORD button to GND       | D7              | 10          |
+//! | CATEGORY button to GND     | D8              | 17          |
 //!
 //! ## Serial commands (type into the monitor)
 //!
@@ -93,9 +93,9 @@ use esp_backtrace as _;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-// ---------------------------------------------------------------------------
-// Tunables
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------------
+// Tunable parameters
+// --------------------------------------------------------------------------------
 
 /// Try the on-IMU DMP first; fall back to software fusion if it fails.
 const PREFER_DMP: bool = true;
@@ -104,29 +104,31 @@ const PREFER_DMP: bool = true;
 const VERIFY_DMP_FIRMWARE: bool = true;
 
 /// IMU output rate = 1125 / (1 + div) Hz. 4 gives 225 Hz, the fastest rate
-/// SparkFun documents for the DMP. An exact 200 Hz is not available.
+/// SparkFun documents for the DMP. Exact '200 Hz' is not available.
 const SAMPLE_RATE_DIV: u8 = 4;
 
 /// One second of history at 225 Hz; 225 x 120 bytes = 27,000 bytes of SRAM.
 const WINDOW_FRAMES: usize = 225;
 
 /// Bits of `valid_pressure_mask` to set: one bit per connected sensor on
-/// A0..A3. All four channels are always sampled and stored; this only says
-/// which ones to trust. Set bit 0 once a divider is wired to A0.
+/// A0..A3. All four channels are always sampled and stored; this only says which
+/// to trust. Set bit 0 once a voltage divider is wired to A0 for pressure sensors
 const CONNECTED_PRESSURE_MASK: u8 = 0b0000;
 
 /// Frames handed to the SD card per loop pass while recording: 16 x 120 =
-/// 1,920 bytes, about 4 sectors, written in 10-25 ms. Small enough that the
+/// 1,920 bytes (about 4x 512KB sectors) written in 10-25 ms. Small enough that the
 /// IMU FIFO (1 kB in DMP mode, ~115 ms) never overflows during a write.
 const SD_FRAMES_PER_PASS: usize = 16;
 
-/// How often the directory entry is flushed while recording. A flush is a
-/// read-modify-write of the FAT that can stall for tens of milliseconds.
+/// How often the directory entry is flushed while recording. A flush is a read-modify-
+/// -write of the File allocation table (a.k.a, FAT) that can stall for tens of milliseconds.
 const SD_FLUSH_PERIOD: Duration = Duration::from_secs(5);
 
 /// FAT 8.3 extension for 120-byte fused recordings (`.BIN` stays 72-byte).
 const FILE_EXTENSION: &str = "Q6B";
 
+/// Madgwick is a sensor-fusion algorithm that estimates orientation from accel & gyro
+/// and outputs quaternions.
 /// Madgwick gain: higher trusts the accelerometer more and settles faster.
 const MADGWICK_BETA: f32 = 0.1;
 
@@ -135,9 +137,9 @@ const BUTTON_PERIOD: Duration = Duration::from_millis(5);
 const DEBOUNCE_SAMPLES: u8 = 6;
 const PAUSE_MS: u32 = 2_000;
 
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------------
 // Static buffers (allocated at compile time, never on the stack)
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------------
 
 /// The one-second rolling history every consumer reads from.
 static WINDOW: ConstStaticCell<FusedWindowBuffer<WINDOW_FRAMES>> =
@@ -146,9 +148,9 @@ static WINDOW: ConstStaticCell<FusedWindowBuffer<WINDOW_FRAMES>> =
 /// Staging area for frames encoded for the SD card.
 static BATCH: ConstStaticCell<FusedFrameBatch> = ConstStaticCell::new(FusedFrameBatch::new());
 
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------------
 // SD-card plumbing
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------------
 
 /// The SD card as seen by `embedded-sdmmc`: an SPI bus with a chip-select pin.
 type SdBlockDevice = SdCard<ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, Delay>, Delay>;
@@ -167,9 +169,9 @@ impl TimeSource for FixedTime {
     }
 }
 
-// ---------------------------------------------------------------------------
+// ----------------------------------------------------------------------------------------------
 // Small helper types
-// ---------------------------------------------------------------------------
+// ----------------------------------------------------------------------------------------------
 
 /// Software debounce: a level must be stable for `DEBOUNCE_SAMPLES` polls
 /// (30 ms at the 5 ms poll rate) before it counts.
@@ -196,11 +198,14 @@ impl DebouncedButton {
             self.count = 1;
             return false;
         }
+
         self.count = self.count.saturating_add(1);
+
         if self.count >= DEBOUNCE_SAMPLES && self.stable_low != self.candidate_low {
             self.stable_low = self.candidate_low;
             return self.stable_low; // a press is a confirmed transition to low
         }
+
         false
     }
 }
@@ -282,9 +287,9 @@ fn print_help() {
     );
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------
 // IMU start-up and frame building
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------
 
 /// Resets the IMU and starts streaming: DMP if requested and it loads,
 /// otherwise the raw FIFO. Returns the mode that is actually running.
@@ -301,15 +306,18 @@ where
 
     if prefer_dmp {
         let started = now_us();
+
         // Load firmware, ask for all three outputs in every packet, go.
         let result: Result<(), ImuError<I2C::Error>> = imu
             .dmp_initialize(delay, config.sample_rate_div, VERIFY_DMP_FIRMWARE)
             .and_then(|_| imu.dmp_enable_outputs(DmpOutputs::ALL))
             .and_then(|_| imu.dmp_set_all_odrs(0))
             .and_then(|_| imu.dmp_start());
+
         match result {
             Ok(()) => {
                 let state = imu.dmp_state();
+
                 println!(
                     "DMP ready in {} ms: firmware {} bytes verified={} pll=0x{:02X} gyro_sf={}",
                     (now_us() - started) / 1_000,
@@ -318,6 +326,7 @@ where
                     state.pll,
                     state.gyro_sf
                 );
+
                 return AcquisitionMode::Dmp;
             }
             Err(error) => {
@@ -325,6 +334,7 @@ where
                     "DMP init FAILED: {:?}; falling back to raw FIFO + Madgwick",
                     error
                 );
+
                 imu.reset(delay).unwrap();
             }
         }
@@ -332,10 +342,12 @@ where
 
     imu.configure(config).unwrap();
     imu.start_raw_fifo().unwrap();
+
     println!(
         "Raw FIFO streaming (12 bytes/sample), Madgwick beta {}",
         MADGWICK_BETA
     );
+
     AcquisitionMode::RawFifo
 }
 
@@ -357,17 +369,22 @@ fn fill_from_dmp(frame: &mut FusedFrame, packet: &DmpPacket, accuracy: &mut (u16
         frame.raw.imus[0].accel = accel;
         frame.raw.valid_imu_mask = 0b0001;
     }
+
     if let Some(gyro) = packet.gyro {
         frame.raw.imus[0].gyro = gyro;
     }
+
     if let Some(value) = packet.accel_accuracy {
         accuracy.0 = value & status::ACCURACY_MASK;
     }
+
     if let Some(value) = packet.gyro_accuracy {
         accuracy.1 = value & status::ACCURACY_MASK;
     }
+
     frame.raw.status_flags |=
         (accuracy.0 << status::ACCEL_ACCURACY_SHIFT) | (accuracy.1 << status::GYRO_ACCURACY_SHIFT);
+
     if let Some(quat) = packet.quat6 {
         frame.quat6[0] = Quat6Raw {
             x: quat[0],
@@ -391,7 +408,9 @@ fn fill_from_raw(
         scale.accel_g(sample.accel),
         dt,
     );
+
     let quat = madgwick.quat6_q30();
+
     frame.raw.imus[0].accel = sample.accel;
     frame.raw.imus[0].gyro = sample.gyro;
     frame.raw.valid_imu_mask = 0b0001;
@@ -400,12 +419,14 @@ fn fill_from_raw(
         y: quat[1],
         z: quat[2],
     };
+
     frame.raw.status_flags |= status::ORIENTATION_SOFTWARE;
 }
 
 /// Prints one frame as hex, split at the 72-byte raw/quaternion boundary.
 fn dump_frame(frame: &FusedFrame) {
     let encoded = frame.encode_le();
+
     println!(
         "FRAME seq {} ts {} us flags 0x{:04X} ({} bytes: raw 0..{} | quat {}..{})",
         frame.raw.sequence,
@@ -416,6 +437,7 @@ fn dump_frame(frame: &FusedFrame) {
         FRAME_WIRE_BYTES,
         FUSED_FRAME_WIRE_BYTES
     );
+
     for (row, chunk) in encoded.chunks(24).enumerate() {
         let offset = row * 24;
         let label = if offset < FRAME_WIRE_BYTES {
@@ -423,10 +445,13 @@ fn dump_frame(frame: &FusedFrame) {
         } else {
             "quat"
         };
+
         let mut line = String::<96>::new();
+
         for byte in chunk {
             write!(&mut line, "{:02X} ", byte).unwrap();
         }
+
         println!(
             "  {} [{:>3}..{:>3}] {}",
             label,
@@ -435,8 +460,10 @@ fn dump_frame(frame: &FusedFrame) {
             line.as_str()
         );
     }
+
     let q = frame.quat6[0];
     let (x, y, z) = (q30_to_f32(q.x), q30_to_f32(q.y), q30_to_f32(q.z));
+
     println!(
         "  imu0 accel {:?} gyro {:?} pressure {:?} quat6 w={:+.4} x={:+.4} y={:+.4} z={:+.4}",
         frame.raw.imus[0].accel,
@@ -449,14 +476,14 @@ fn dump_frame(frame: &FusedFrame) {
     );
 }
 
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------
 // Recorder: a cursor that walks the RAM window out to the SD card
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------
 
-/// While a file is open, `next_seq` is the sequence number of the next frame
-/// to write. Each loop pass writes a bounded number of frames from there, so
-/// the one-second pre-roll streams out at ~3x real time and a pass is never
-/// blocked longer than the IMU FIFO can cover.
+/// While a file is open, `next_seq` is the sequence number of the next frame to write.
+/// Each loop pass writes a bounded number of frames from there, so the one-second
+/// pre-roll streams out at ~3x real time and a pass is never blocked longer than
+/// the IMU FIFO can cover.
 struct Recorder<'r, 'v> {
     /// Root directory, or `None` when no card mounted (recording is refused).
     root: Option<&'r SdDirectory<'v>>,
@@ -495,10 +522,12 @@ impl<'r, 'v> Recorder<'r, 'v> {
             println!("RECORD ignored: no SD card mounted");
             return;
         };
+
         let directory = root.open_dir(category.directory()).unwrap();
 
         // Find the first unused session number.
         let mut name = String::<12>::new();
+
         for session in 0..=9_999_999_u32 {
             name.clear();
             write!(&mut name, "S{:07}.{}", session, FILE_EXTENSION).unwrap();
@@ -517,6 +546,7 @@ impl<'r, 'v> Recorder<'r, 'v> {
         self.name = name;
         self.category = category;
         self.file = Some(file);
+
         println!(
             "RECORDING STARTED: /{}/{} with {} pre-roll frames queued ({} mode)",
             category.directory(),
@@ -540,10 +570,12 @@ impl<'r, 'v> Recorder<'r, 'v> {
         else {
             return 0;
         };
+
         let oldest_seq = oldest.raw.sequence;
 
         // Wrapping arithmetic so a sequence rollover does not confuse "behind".
         let behind = oldest_seq.wrapping_sub(self.next_seq);
+
         if behind != 0 && behind < 0x8000_0000 {
             println!("RECORDER fell behind the window: {} frames lost", behind);
             stats.record_dropped += behind;
@@ -551,12 +583,15 @@ impl<'r, 'v> Recorder<'r, 'v> {
         }
 
         let mut written = 0;
+
         while newest.raw.sequence.wrapping_sub(self.next_seq) < 0x8000_0000 && written < limit {
             let index = self.next_seq.wrapping_sub(oldest_seq) as usize;
+
             if batch.push(window.get(index).unwrap()) {
                 file.write(batch.encoded()).unwrap();
                 batch.clear();
             }
+
             self.next_seq = self.next_seq.wrapping_add(1);
             written += 1;
         }
@@ -573,19 +608,23 @@ impl<'r, 'v> Recorder<'r, 'v> {
         if !self.is_active() {
             return;
         }
+
         let started = now_us();
         let written = self.write_from_cursor(window, batch, SD_FRAMES_PER_PASS, stats);
 
         // Push a partially filled batch to the card once it is worth a write.
         let file = self.file.as_ref().unwrap();
+
         if batch.frames() >= SD_FRAMES_PER_PASS {
             file.write(batch.encoded()).unwrap();
             batch.clear();
         }
+
         if self.last_flush.elapsed() >= SD_FLUSH_PERIOD {
             file.flush().unwrap();
             self.last_flush = Instant::now();
         }
+
         if written > 0 {
             stats.sd_write_max_us = stats.sd_write_max_us.max(now_us() - started);
         }
@@ -601,13 +640,18 @@ impl<'r, 'v> Recorder<'r, 'v> {
     ) {
         self.write_from_cursor(window, batch, usize::MAX, stats);
         let Some(file) = self.file.take() else { return };
+
         if !batch.is_empty() {
             file.write(batch.encoded()).unwrap();
             batch.clear();
         }
+
         file.flush().unwrap();
+
         let bytes = file.length();
+
         file.close().unwrap();
+
         println!(
             "RECORDING STOPPED: /{}/{} = {} bytes = {} fused frames safely closed",
             self.category.directory(),
@@ -615,6 +659,7 @@ impl<'r, 'v> Recorder<'r, 'v> {
             bytes,
             bytes as usize / FUSED_FRAME_WIRE_BYTES
         );
+
         self.verify(bytes);
     }
 
@@ -625,15 +670,20 @@ impl<'r, 'v> Recorder<'r, 'v> {
         let file = directory
             .open_file_in_dir(self.name.as_str(), Mode::ReadOnly)
             .unwrap();
+
         let mut first = [0_u8; FUSED_FRAME_WIRE_BYTES];
         let mut last = [0_u8; FUSED_FRAME_WIRE_BYTES];
         let first_len = file.read(&mut first).unwrap();
+
         file.seek_from_end(FUSED_FRAME_WIRE_BYTES as u32).unwrap();
+
         let last_len = file.read(&mut last).unwrap();
+
         file.close().unwrap();
         directory.close().unwrap();
 
         let whole_frames = bytes as usize % FUSED_FRAME_WIRE_BYTES == 0;
+
         if first_len != FUSED_FRAME_WIRE_BYTES
             || last_len != FUSED_FRAME_WIRE_BYTES
             || !whole_frames
@@ -644,10 +694,12 @@ impl<'r, 'v> Recorder<'r, 'v> {
             );
             return;
         }
+
         let first = FusedFrame::decode_le(&first);
         let last = FusedFrame::decode_le(&last);
         let frames = u64::from(last.raw.sequence.wrapping_sub(first.raw.sequence)) + 1;
         let span_us = last.raw.timestamp_us.saturating_sub(first.raw.timestamp_us);
+
         println!(
             "READBACK OK: seq {}..{} ({} frames, {} in file), {} ms span, {} Hz effective, flags 0x{:04X}",
             first.raw.sequence,
@@ -665,14 +717,15 @@ impl<'r, 'v> Recorder<'r, 'v> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// main
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------------------
 
 #[esp_hal::main]
 fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
     let mut delay = Delay::new();
+
     // Receive side of the USB serial port, for the single-key commands.
     let mut usb_serial = UsbSerialJtag::new(peripherals.USB_DEVICE);
 
@@ -690,7 +743,7 @@ fn main() -> ! {
         WINDOW_FRAMES * core::mem::size_of::<FusedFrame>()
     );
 
-    // ----- IMU: probe both possible addresses until one answers -----------
+    // ------------------- IMU: probe both possible addresses until one answers ---------------------
     let i2c = I2c::new(
         peripherals.I2C0,
         I2cConfig::default().with_frequency(Rate::from_khz(400)),
@@ -698,13 +751,16 @@ fn main() -> ! {
     .unwrap()
     .with_sda(peripherals.GPIO11)
     .with_scl(peripherals.GPIO12);
+
     let mut imu = Icm20948::new(i2c, legday_icm20948::I2C_ADDR_AD0_HIGH);
+
     'probe: loop {
         for address in [
             legday_icm20948::I2C_ADDR_AD0_HIGH,
             legday_icm20948::I2C_ADDR_AD0_LOW,
         ] {
             imu.set_address(address);
+
             match imu.who_am_i() {
                 Ok(legday_icm20948::WHO_AM_I_VALUE) => {
                     println!("ICM-20948 found at 0x{:02X} (WHO_AM_I = 0xEA)", address);
@@ -717,6 +773,7 @@ fn main() -> ! {
                 Err(error) => println!("0x{:02X}: {:?}", address, error),
             }
         }
+
         println!("No IMU answered. Check Qwiic blue->A4, yellow->A5, 3V3, GND. Retrying...");
         delay.delay_millis(1_000);
     }
@@ -725,17 +782,21 @@ fn main() -> ! {
         sample_rate_div: SAMPLE_RATE_DIV,
         ..ImuConfig::default()
     };
+
     let period_us = u64::from(imu_config.period_us());
+
     println!(
         "IMU ODR {}.{:03} Hz, nominal period {} us",
         imu_config.odr_millihz() / 1_000,
         imu_config.odr_millihz() % 1_000,
         period_us
     );
+
     let mut mode = start_acquisition(&mut imu, &mut delay, &imu_config, PREFER_DMP);
+
     println!("Acquisition mode: {}", mode.name());
 
-    // ----- Pressure sensors on ADC1 -----------------------------------------
+    // ---------------------------- Pressure sensors on ADC1 -----------------------------------------
     let mut adc_config = AdcConfig::new();
     let mut pressure = PressureInputs {
         a0: adc_config.enable_pin(peripherals.GPIO1, Attenuation::_11dB),
@@ -745,7 +806,7 @@ fn main() -> ! {
         adc: Adc::new(peripherals.ADC1, adc_config),
     };
 
-    // ----- SD card: init at 400 kHz, then run the bus at 4 MHz ---------------
+    // ------------------------- SD card: init at 400 kHz, then run the bus at 4 MHz -----------------
     let cs = Output::new(peripherals.GPIO21, Level::High, OutputConfig::default());
     let mut spi_bus = Spi::new(
         peripherals.SPI2,
@@ -758,10 +819,12 @@ fn main() -> ! {
     .with_miso(peripherals.GPIO47)
     .with_mosi(peripherals.GPIO38);
     spi_bus.write(&[0xff; 10]).unwrap(); // cards need >= 74 idle clocks before the first command
+
     let sdcard = SdCard::new(
         ExclusiveDevice::new(spi_bus, cs, Delay::new()).unwrap(),
         Delay::new(),
     );
+
     let sd_present = match sdcard.num_bytes() {
         Ok(bytes) => {
             println!("SD initialized: {} bytes", bytes);
@@ -777,18 +840,22 @@ fn main() -> ! {
             });
             true
         }
+
         Err(error) => {
             println!("SD INIT FAILED: {:?} (continuing without recording)", error);
             false
         }
     };
+
     let volume_manager = VolumeManager::new(sdcard, FixedTime);
     let volume = sd_present
         .then(|| volume_manager.open_volume(VolumeIdx(0)).ok())
         .flatten();
+
     let root = volume
         .as_ref()
         .map(|volume| volume.open_root_dir().unwrap());
+
     if let Some(root) = root.as_ref() {
         for category in MotionCategory::ALL {
             if !root.directory_entry_exists(category.directory()) {
@@ -797,22 +864,25 @@ fn main() -> ! {
             }
         }
     }
+
     let mut recorder = Recorder::new(root.as_ref());
 
-    // ----- Buttons --------------------------------------------------------
+    // ------------------------------- Buttons ------------------------------------------------
     let record_pin = Input::new(
         peripherals.GPIO10,
         InputConfig::default().with_pull(Pull::Up),
     );
+
     let category_pin = Input::new(
         peripherals.GPIO17,
         InputConfig::default().with_pull(Pull::Up),
     );
+
     let mut record_button = DebouncedButton::new();
     let mut category_button = DebouncedButton::new();
     let mut category = MotionCategory::Walk;
 
-    // ----- Loop state -------------------------------------------------------
+    // -------------------------------- Loop state --------------------------------------------
     let window = WINDOW.take();
     let batch = BATCH.take();
     let scale = ImuScale::ICM20948_4G_2000DPS;
@@ -837,10 +907,11 @@ fn main() -> ! {
         category.directory(),
         FILE_EXTENSION
     );
+
     print_help();
 
     loop {
-        // ===== 1. Drain the IMU FIFO into the RAM window ===================
+        // ===================== 1. Drain the IMU FIFO into the RAM window =============================
         let drain_started = now_us();
         let pressure_counts = pressure.read();
         let mut new_frames = 0_usize;
@@ -854,9 +925,11 @@ fn main() -> ! {
                     }
                     Default::default()
                 });
+
                 stats.fifo_max_bytes = stats.fifo_max_bytes.max(read.fifo_bytes);
                 stats.resyncs += u32::from(read.resynced);
                 stats.overflows += u32::from(read.overflowed);
+
                 if read.resynced || read.overflowed {
                     overflow_pending = true;
                     clock.resync(); // samples were lost; re-measure the rate
@@ -864,27 +937,37 @@ fn main() -> ! {
 
                 // One frame per packet, timestamps from the sample clock.
                 let mut index = 0;
+
                 clock.burst(drain_started, read.packets, |timestamp_us| {
                     let packet = &packets[index];
+
                     index += 1;
+
                     let mut frame = base_frame(timestamp_us, sequence, pressure_counts);
+
                     fill_from_dmp(&mut frame, packet, &mut dmp_accuracy);
+
                     if let Some(q) = packet.quat6 {
                         let (x, y, z) = (q30_to_f32(q[0]), q30_to_f32(q[1]), q30_to_f32(q[2]));
                         last_dmp_quat = [reconstruct_w(x, y, z), x, y, z];
                     }
+
                     // The software filter runs too, purely to cross-check the DMP.
                     if let (Some(accel), Some(gyro)) = (packet.accel, packet.gyro) {
                         let accel_g = scale.accel_g(accel);
+
                         if !madgwick_seeded {
                             madgwick.reset_to_gravity(accel_g);
                             madgwick_seeded = true;
                         }
+
                         madgwick.update(scale.gyro_rad_s(gyro), accel_g, period_us as f32 * 1e-6);
                     }
+
                     if core::mem::take(&mut overflow_pending) {
                         frame.raw.status_flags |= status::FIFO_OVERFLOW;
                     }
+
                     sequence = sequence.wrapping_add(1);
                     window.push(frame);
                     new_frames += 1;
@@ -898,9 +981,12 @@ fn main() -> ! {
                         if stats.bus_errors <= 5 {
                             println!("I2C error while draining raw FIFO: {:?}", error);
                         }
+
                         Default::default()
                     });
+
                 stats.fifo_max_bytes = stats.fifo_max_bytes.max(read.fifo_bytes);
+
                 if read.overflowed {
                     stats.overflows += 1;
                     overflow_pending = true;
@@ -908,14 +994,19 @@ fn main() -> ! {
                 }
 
                 let mut index = 0;
+
                 clock.burst(drain_started, read.samples, |timestamp_us| {
                     let sample = &raw_samples[index];
+
                     index += 1;
+
                     if !madgwick_seeded {
                         madgwick.reset_to_gravity(scale.accel_g(sample.accel));
                         madgwick_seeded = true;
                     }
+
                     let mut frame = base_frame(timestamp_us, sequence, pressure_counts);
+
                     fill_from_raw(
                         &mut frame,
                         sample,
@@ -923,9 +1014,11 @@ fn main() -> ! {
                         &scale,
                         period_us as f32 * 1e-6,
                     );
+
                     if core::mem::take(&mut overflow_pending) {
                         frame.raw.status_flags |= status::FIFO_OVERFLOW;
                     }
+
                     sequence = sequence.wrapping_add(1);
                     window.push(frame);
                     new_frames += 1;
@@ -938,16 +1031,20 @@ fn main() -> ! {
         stats.max_burst = stats.max_burst.max(new_frames);
         stats.drain_time_max_us = stats.drain_time_max_us.max(now_us() - drain_started);
 
-        // ===== 2. Collect input: buttons every 5 ms, serial keys always ====
+        // ===================== 2. Collect input: buttons every 5 ms, serial keys always ===================
+
         if Instant::now() >= next_button_poll {
             next_button_poll += BUTTON_PERIOD;
+
             if category_button.update(category_pin.is_low()) {
                 let _ = actions.push(Action::NextCategory);
             }
+
             if record_button.update(record_pin.is_low()) {
                 let _ = actions.push(Action::ToggleRecord);
             }
         }
+
         while let Ok(byte) = usb_serial.read_byte() {
             let action = match byte.to_ascii_lowercase() {
                 b'r' => Some(Action::ToggleRecord),
@@ -958,12 +1055,14 @@ fn main() -> ! {
                 b'h' | b'?' => Some(Action::Help),
                 _ => None,
             };
+
             if let Some(action) = action {
                 let _ = actions.push(action);
             }
         }
 
-        // ===== 3. Perform the requested actions ============================
+        // ====================== 3. Perform the requested actions ==============================
+
         for action in actions.iter().copied() {
             match action {
                 Action::Help => print_help(),
@@ -976,56 +1075,70 @@ fn main() -> ! {
                         "PAUSE: not draining for {} ms; watch 'fifo max' and ovf/resync next",
                         PAUSE_MS
                     );
+
                     delay.delay_millis(PAUSE_MS);
                 }
+
                 Action::NextCategory if recorder.is_active() => {
                     println!("CATEGORY ignored while recording")
                 }
+
                 Action::NextCategory => {
                     category = category.next();
                     println!("Selected /{}", category.directory());
                 }
+
                 Action::ToggleMode if recorder.is_active() => {
                     println!("MODE change ignored while recording")
                 }
+
                 Action::ToggleMode => {
                     // Stop the current stream, restart in the other mode, and
                     // forget history that was produced under the old mode.
+
                     println!("Switching acquisition mode...");
+
                     let _ = match mode {
                         AcquisitionMode::Dmp => imu.dmp_stop(),
                         AcquisitionMode::RawFifo => imu.stop_raw_fifo(),
                     };
+
                     mode = start_acquisition(
                         &mut imu,
                         &mut delay,
                         &imu_config,
                         mode == AcquisitionMode::RawFifo,
                     );
+
                     window.clear();
                     clock.reset();
                     madgwick.reset();
                     madgwick_seeded = false;
                     overflow_pending = false;
                     stats = Stats::default();
+
                     println!("Acquisition mode: {}", mode.name());
                 }
+
                 Action::ToggleRecord if recorder.is_active() => {
                     recorder.stop(window, batch, &mut stats)
                 }
+
                 Action::ToggleRecord => recorder.start(category, window, mode),
             }
         }
+
         actions.clear();
 
-        // ===== 4. Recorder: bounded SD work for this pass =================
+        // ======================= 4. Recorder: bounded SD work for this pass ============================
         // Runs after the actions so a fresh recording writes its first frames
         // before the next drain can overwrite the oldest ones.
         recorder.step(window, batch, &mut stats);
 
-        // ===== 5. Status line once per second ==============================
+        // ======================= 5. Status line once per second ========================================
         if Instant::now() >= next_status {
             next_status += STATUS_PERIOD;
+
             let latest = window.latest().copied().unwrap_or(FusedFrame::ZERO);
             let accel = latest.raw.imus[0].accel;
             let gyro = latest.raw.imus[0].gyro;
@@ -1055,6 +1168,7 @@ fn main() -> ! {
                 window.capacity(),
                 if recorder.is_active() { " REC" } else { "" }
             );
+
             println!(
                 "         accel [{:>6} {:>6} {:>6}] = {:.2} g  gyro [{:>6} {:>6} {:>6}]  pressure {:?}  seq {}",
                 accel[0],
@@ -1067,8 +1181,10 @@ fn main() -> ! {
                 latest.raw.pressure_adc,
                 latest.raw.sequence
             );
+
             if mode == AcquisitionMode::Dmp {
                 let dmp_down = down_in_body(last_dmp_quat);
+
                 println!(
                     "         DMP  q=[{:+.4} {:+.4} {:+.4} {:+.4}] down=[{:+.2} {:+.2} {:+.2}] acc/gyro accuracy {}/{}",
                     last_dmp_quat[0],
@@ -1095,13 +1211,15 @@ fn main() -> ! {
                 accel_g[1] / accel_norm,
                 accel_g[2] / accel_norm
             );
+
             stats.frames_this_period = 0;
             stats.max_burst = 0;
             stats.drain_time_max_us = 0;
             stats.sd_write_max_us = 0;
         }
 
-        // ===== 6. Idle: nothing queued, so do not hammer the I2C bus =======
+        // ====================== 6. Idle: nothing queued, so do not hammer the I2C bus =============================
+
         if new_frames == 0 {
             delay.delay_micros(500);
         }
