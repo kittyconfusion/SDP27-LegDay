@@ -47,7 +47,8 @@
 //!
 //! `r` record start/stop · `c` next category · `d` hex-dump the newest frame ·
 //! `p` pause draining 2 s (measures FIFO depth) · `x` run the bus/latency/wake
-//! diagnostics (see `imu_diag.rs`) · `h` help.
+//! diagnostics (see `imu_diag.rs`) · `b` time CNN models of several sizes ·
+//! `h` help.
 //!
 //! ## How to read this file
 //!
@@ -102,6 +103,9 @@ mod imu_diag;
 
 /// Acquire -> fuse -> frame stages for up to four IMUs.
 mod imu_pipeline;
+
+/// Runs the CNN on the live window and reports its answer and timing.
+mod imu_classifier;
 
 use imu_pipeline::Pipeline;
 
@@ -246,6 +250,7 @@ enum Action {
     DumpFrame,
     Pause,
     Diagnostics,
+    ModelBench,
     Help,
 }
 
@@ -298,7 +303,7 @@ fn now_us() -> u64 {
 
 fn print_help() {
     println!(
-        "Serial commands: r=record start/stop, c=next category, d=dump newest frame, p=pause 2 s (FIFO depth), x=diagnostics, h=help"
+        "Serial commands: r=record start/stop, c=next category, d=dump newest frame, p=pause 2 s (FIFO depth), x=diagnostics, b=model benchmark, h=help"
     );
 }
 
@@ -776,6 +781,14 @@ fn main() -> ! {
     let window = WINDOW.take();
     let batch = BATCH.take();
     let mut diag_buffers = imu_diag::Buffers::take(); // taken once so diagnostics can rerun
+
+    let mut classifier = match imu_classifier::LiveClassifier::new() {
+        Ok(classifier) => Some(classifier),
+        Err(error) => {
+            println!("Classifier disabled: demo model rejected: {:?}", error);
+            None
+        }
+    };
     let mut stats = Stats::default();
     let sample_period = Duration::from_micros(period_us);
     let mut next_acquire = Instant::now();
@@ -812,6 +825,11 @@ fn main() -> ! {
 
             stats.frames_this_period += new_frames as u32;
             stats.total_frames += new_frames as u32;
+
+            // Classify the newest second every few frames.
+            if let Some(classifier) = classifier.as_mut() {
+                classifier.on_new_frames(new_frames, window);
+            }
         }
 
         // ===================== 4. Collect input: buttons every 5 ms, serial keys always ===================
@@ -839,6 +857,7 @@ fn main() -> ! {
                 b'd' => Some(Action::DumpFrame),
                 b'p' => Some(Action::Pause),
                 b'x' => Some(Action::Diagnostics),
+                b'b' => Some(Action::ModelBench),
                 b'h' | b'?' => Some(Action::Help),
                 _ => None,
             };
@@ -877,6 +896,21 @@ fn main() -> ! {
                     println!("Selected /{}", category.directory());
                 }
 
+                Action::ModelBench if recorder.is_active() => {
+                    println!("MODEL BENCH ignored while recording")
+                }
+
+                Action::ModelBench => {
+                    // Blocks the loop for a few seconds; the IMU FIFO covers
+                    // about 1.2 s, so frames from that time are dropped.
+                    if let Some(classifier) = classifier.as_mut() {
+                        imu_diag::run_model_bench(classifier.buffers());
+                    }
+
+                    pipeline.start(&mut delay);
+                    window.clear();
+                }
+
                 Action::Diagnostics if recorder.is_active() => {
                     println!("DIAGNOSTICS ignored while recording")
                 }
@@ -887,11 +921,20 @@ fn main() -> ! {
                     pipeline.stop();
 
                     if let Some(primary) = pipeline.primary() {
+                        // The model benchmark borrows the classifier's buffers.
+                        let mut spare_input = [0.0_f32; 0];
+                        let mut spare_scratch = [0.0_f32; 0];
+                        let model_buffers = match classifier.as_mut() {
+                            Some(classifier) => classifier.buffers(),
+                            None => (&mut spare_input[..], &mut spare_scratch[..]),
+                        };
+
                         imu_diag::run(
                             &mut primary.imu,
                             &mut delay,
                             &mut diag_buffers,
                             &mut pressure,
+                            model_buffers,
                             period_us,
                         );
                     }
@@ -920,6 +963,11 @@ fn main() -> ! {
             next_status = next_deadline(next_status, STATUS_PERIOD);
             print_status(&stats, &mut pipeline, window, &recorder, started_at);
 
+            if let Some(classifier) = classifier.as_mut() {
+                print_classifier(classifier);
+                classifier.timing = Default::default();
+            }
+
             stats.frames_this_period = 0;
             stats.sd_write_max_us = 0;
             stats.adc_us_max = 0;
@@ -937,6 +985,35 @@ fn main() -> ! {
             delay.delay_micros(wait_us as u32);
         }
     }
+}
+
+/// Prints the classifier's latest answer and the cost of producing it.
+fn print_classifier(classifier: &imu_classifier::LiveClassifier) {
+    let timing = classifier.timing;
+    let runs = timing.runs.max(1) as f32;
+
+    let answer = match classifier.last {
+        Some(prediction) => {
+            let mut text = String::<40>::new();
+            let _ = write!(
+                &mut text,
+                "{} {:.0}%",
+                classifier.model.class_name(prediction.class),
+                prediction.probability * 100.0
+            );
+            text
+        }
+        None => String::try_from("(window filling)").unwrap_or_default(),
+    };
+
+    println!(
+        "         classifier: {} [demo model, synthetic training data] | {} runs/s | input {:.0} us | inference {:.1} ms (max {:.1} ms)",
+        answer.as_str(),
+        timing.runs,
+        timing.input_us_total as f32 / runs,
+        timing.infer_us_total as f32 / runs / 1_000.0,
+        timing.infer_us_max as f32 / 1_000.0
+    );
 }
 
 /// Prints the once-per-second status block: rates and error counters, the

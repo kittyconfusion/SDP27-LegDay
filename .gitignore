@@ -24,3 +24,6 @@ target/
 
 # Ignore .DS_Store file in mac
 **/.DS_Store
+.claude/
+# Untrained CNN benchmark models (regenerate: python3 Scripts/train_classifier.py bench-models)
+crates/legday-classifier/models/bench/

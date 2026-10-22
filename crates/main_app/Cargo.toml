@@ -30,6 +30,9 @@ esp32s3 = [
     "esp-println/esp32s3",
     "esp-radio/esp32s3",
 ]
+# Adds the CNN size sweep to the diagnostics. Generate the models first:
+#   python3 Scripts/train_classifier.py bench-models
+model-bench = []
 esp32c6 = [
     "esp-backtrace/esp32c6",
     "esp-hal/esp32c6",

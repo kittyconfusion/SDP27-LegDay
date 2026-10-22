@@ -44,8 +44,12 @@ use legday_icm20948::{Config as ImuConfig, RawSample};
 use super::{Imu, WINDOW_FRAMES, now_us};
 
 /// Samples each IMU may queue between frames. One pass normally adds 1-2;
-/// the headroom covers a long pause such as an SD flush.
-const QUEUE_CAPACITY: usize = 64;
+/// the headroom covers a long pause such as an SD flush or a slow
+/// classification (128 samples = 0.57 s at 225 Hz).
+const QUEUE_CAPACITY: usize = 128;
+
+/// Samples read from the FIFO per I2C burst.
+const DRAIN_CHUNK: usize = 32;
 
 /// How many samples one IMU may run ahead of the slowest before its surplus
 /// is dropped to bring them back into step.
@@ -111,16 +115,35 @@ impl ImuSlot {
         }
     }
 
-    /// Stage 1 for this IMU: read whatever its FIFO holds and queue it with
-    /// timestamps. Returns the number of samples read.
+    /// Stage 1 for this IMU: empty its FIFO into the queue, in bursts of
+    /// `DRAIN_CHUNK`, stopping early only if the queue is nearly full (the
+    /// rest then waits in the FIFO for the next pass). Returns samples read.
+    fn drain_all(&mut self) -> usize {
+        let mut total = 0;
+
+        while QUEUE_CAPACITY - self.queue.len() >= DRAIN_CHUNK {
+            let read = self.drain();
+            total += read;
+
+            if read < DRAIN_CHUNK {
+                break; // FIFO is empty
+            }
+        }
+
+        total
+    }
+
+    /// Reads one burst of up to `DRAIN_CHUNK` samples from the FIFO and
+    /// queues them with timestamps. Returns the number of samples read.
     fn drain(&mut self) -> usize {
-        let mut samples = [RawSample::default(); 32];
+        let mut samples = [RawSample::default(); DRAIN_CHUNK];
         let drain_us = now_us();
 
         let read = match self.imu.read_raw_fifo_samples(&mut samples) {
             Ok(read) => read,
             Err(error) => {
                 self.stats.bus_errors += 1;
+
                 if self.stats.bus_errors <= 5 {
                     println!("I2C error while draining IMU FIFO: {:?}", error);
                 }
@@ -191,6 +214,7 @@ impl ImuSlot {
             .update_with_gain(gyro_rad_s, accel_g, self.dt_s, accel_trust(accel_g));
 
         let [x, y, z] = self.filter.quat6_q30();
+
         Quat6Raw { x, y, z }
     }
 
@@ -307,7 +331,12 @@ impl Pipeline {
     /// Stage 1: drain every IMU, back to back. Returns samples read.
     pub fn acquire(&mut self) -> usize {
         let started_us = now_us();
-        let samples: usize = self.slots.iter_mut().flatten().map(ImuSlot::drain).sum();
+        let samples: usize = self
+            .slots
+            .iter_mut()
+            .flatten()
+            .map(ImuSlot::drain_all)
+            .sum();
         let bus_us = now_us() - started_us;
 
         self.timing.passes += 1;
@@ -370,6 +399,7 @@ impl Pipeline {
                     accel: timed.sample.accel,
                     gyro: timed.sample.gyro,
                 };
+
                 frame.quat6[index] = slot.fuse(&timed.sample, &self.scale);
                 frame.raw.valid_imu_mask |= 1 << index;
 
@@ -401,6 +431,7 @@ impl Pipeline {
             }
 
             window.push(frame);
+
             self.sequence = self.sequence.wrapping_add(1);
 
             self.timing.frames += 1;

@@ -91,7 +91,8 @@ sequence.
 
 Branch `tim/testing-memory-and-sensors` adds a real ICM-20948 driver with DMP
 quaternions, the 120-byte fused frame, and the `imu-sensor-test` firmware; see
-[the IMU bring-up notes](docs/imu-bringup.md) and run it with
+[the IMU bring-up notes](docs/imu-bringup.md). The motion classifier (data collection, training on a Mac, running on the
+board, measured limits) is described in [the classifier guide](docs/classifier.md) and run it with
 `bash crates/scripts/firmware.sh imu /dev/cu.usbmodemXXXX`.
 
 ## Matching host tools
