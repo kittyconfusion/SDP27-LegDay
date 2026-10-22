@@ -146,7 +146,7 @@ pub struct Model<'m> {
 
     /// Largest activation (channels x steps) any layer produces.
     max_activation: usize,
-    /// Extra room the attention layer needs (Q, K, V, one score row, one vector).
+    /// Extra room the attention layer needs (see [`attention_floats`]).
     attention_floats: usize,
     /// Room for gathered input columns in the convolution, for the current
     /// budget, and the budget itself.
@@ -329,7 +329,7 @@ impl<'m> Model<'m> {
                     let output = reader.linear(dim, dim)?;
 
                     model.attention_floats =
-                        model.attention_floats.max(3 * dim * length + length + dim);
+                        model.attention_floats.max(attention_floats(dim, length));
                     model.parameters += 4 * (dim * dim + dim);
                     model.macs += 4 * length * dim * dim + 2 * length * length * dim;
 
@@ -881,8 +881,23 @@ fn conv_relu(
 /// features, with a residual: `out = x + W_o * softmax(Q K^T / sqrt(dim)) V`.
 ///
 /// Mirrors `SelfAttention.forward` in `Scripts/legday_ml.py`. `input` and
-/// `output` are `[feature][time]`; `scratch` holds Q, K, V as `[time][feature]`
-/// plus one row of scores and one mixed vector.
+/// `output` are `[feature][time]`.
+///
+/// Every multiply-add goes through `dot`, like the convolutions, so on the
+/// S3 it runs the vector loop. That needs both operands contiguous and
+/// 16-byte aligned, which decides how `scratch` is laid out (see
+/// [`attention_floats`]):
+///
+/// * `step`: one time step of the input, gathered into a contiguous vector;
+///   each projection is then `bias + dot(weight row, step)`.
+/// * `q`, `k`: `[time][feature]`, so a query and a key are each one row.
+/// * `v_t`: V transposed, `[feature][time]`, with time padded to a multiple
+///   of 4 by zeros, so each mixed feature is `dot(scores, v_t row)`.
+/// * `scores`: one row of attention weights, padded the same way.
+///
+/// `dim` is twice the model width, so with any even width every row starts
+/// on a 16-byte boundary. Other sizes still work: `dot` falls back to plain
+/// Rust for unaligned rows.
 #[allow(clippy::too_many_arguments)]
 fn self_attention(
     input: &[f32],
@@ -895,56 +910,64 @@ fn self_attention(
     scratch: &mut [f32],
     output: &mut [f32],
 ) {
-    let (q, rest) = scratch.split_at_mut(dim * length);
-    let (k, rest) = rest.split_at_mut(dim * length);
-    let (v, rest) = rest.split_at_mut(dim * length);
-    let (scores, rest) = rest.split_at_mut(length);
-    let mixed = &mut rest[..dim];
+    let padded = length.next_multiple_of(4);
 
-    // Project every time step: Q[t] = W_q x[t] + b_q, and the same for K, V.
+    let (q, rest) = aligned_16(scratch).split_at_mut(length * dim);
+    let (k, rest) = rest.split_at_mut(length * dim);
+    let (v_t, rest) = rest.split_at_mut(dim * padded);
+    let (step_input, rest) = rest.split_at_mut(dim);
+    let (mixed, rest) = rest.split_at_mut(dim);
+    let scores = &mut rest[..padded];
+
+    // The padding must be zero: it is multiplied into every mixed feature.
+    v_t.fill(0.0);
+    scores.fill(0.0);
+
+    // 1. Project every time step: Q[t] = W_q x[t] + b_q, and the same for K, V.
     for step in 0..length {
+        for (feature, value) in step_input.iter_mut().enumerate() {
+            *value = input[feature * length + step];
+        }
+
         for row in 0..dim {
-            let mut totals = [query.1[row], key.1[row], value.1[row]];
-
-            for feature in 0..dim {
-                let x = input[feature * length + step];
-                totals[0] += query.0[row * dim + feature] * x;
-                totals[1] += key.0[row * dim + feature] * x;
-                totals[2] += value.0[row * dim + feature] * x;
-            }
-
-            q[step * dim + row] = totals[0];
-            k[step * dim + row] = totals[1];
-            v[step * dim + row] = totals[2];
+            let weights = row * dim..(row + 1) * dim;
+            q[step * dim + row] = query.1[row] + dot(&query.0[weights.clone()], step_input);
+            k[step * dim + row] = key.1[row] + dot(&key.0[weights.clone()], step_input);
+            v_t[row * padded + step] = value.1[row] + dot(&value.0[weights], step_input);
         }
     }
 
     let scale = inv_sqrt(dim as f32);
 
     for step in 0..length {
-        // How much this step attends to every step, as probabilities.
+        // 2. How much this step attends to every step, as probabilities.
         let q_row = &q[step * dim..(step + 1) * dim];
 
-        for (other, score) in scores.iter_mut().enumerate() {
+        for (other, score) in scores[..length].iter_mut().enumerate() {
             *score = dot(q_row, &k[other * dim..(other + 1) * dim]) * scale;
         }
 
-        softmax(scores);
+        softmax(&mut scores[..length]);
 
-        // Weighted mix of the value vectors.
-        for feature in 0..dim {
-            mixed[feature] = (0..length)
-                .map(|other| scores[other] * v[other * dim + feature])
-                .sum();
+        // 3. Weighted mix of the value vectors (padding is 0 in both).
+        for (feature, value) in mixed.iter_mut().enumerate() {
+            *value = dot(scores, &v_t[feature * padded..(feature + 1) * padded]);
         }
 
-        // Output projection plus the residual (the original input).
+        // 4. Output projection plus the residual (the original input).
         for row in 0..dim {
             let projected = output_projection.1[row]
                 + dot(&output_projection.0[row * dim..(row + 1) * dim], mixed);
             output[row * length + step] = input[row * length + step] + projected;
         }
     }
+}
+
+/// Scratch floats [`self_attention`] needs: Q and K, padded V, three
+/// vectors, and up to 3 floats lost to 16-byte alignment.
+fn attention_floats(dim: usize, length: usize) -> usize {
+    let padded = length.next_multiple_of(4);
+    2 * length * dim + dim * padded + 2 * dim + padded + 3
 }
 
 /// Turns scores into probabilities that sum to 1, in place. Subtracting the
@@ -1067,5 +1090,111 @@ mod tests {
         let b = std::vec![2.0_f32; 13];
         assert_eq!(dot(&a, &b), 156.0);
         assert_eq!(dot(&a[..0], &b[..0]), 0.0);
+    }
+
+    /// The attention layer against the formula written out directly in
+    /// f64, for a vector-friendly size and an awkward one.
+    #[test]
+    fn attention_matches_the_formula() {
+        for (dim, length) in [(8, 14), (6, 5)] {
+            // Deterministic values in -1..1.
+            let mut seed = 12_345_u32;
+            let mut next = move || {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 8) as f32 / (1 << 23) as f32 - 1.0
+            };
+
+            let mut fill =
+                |count: usize| -> std::vec::Vec<f32> { (0..count).map(|_| next()).collect() };
+            let input = fill(dim * length);
+            let weights: std::vec::Vec<_> = (0..4).map(|_| (fill(dim * dim), fill(dim))).collect();
+            let pair = |i: usize| (&weights[i].0[..], &weights[i].1[..]);
+
+            let mut scratch = std::vec![0.0; attention_floats(dim, length)];
+            let mut output = std::vec![0.0; dim * length];
+            self_attention(
+                &input,
+                dim,
+                length,
+                pair(0),
+                pair(1),
+                pair(2),
+                pair(3),
+                &mut scratch,
+                &mut output,
+            );
+
+            // out[t] = x[t] + W_o (sum_s softmax_s(q[t] . k[s] / sqrt(dim)) v[s]) + b_o
+            let project = |(w, b): (&[f32], &[f32]), t: usize, row: usize| -> f64 {
+                b[row] as f64
+                    + (0..dim)
+                        .map(|f| w[row * dim + f] as f64 * input[f * length + t] as f64)
+                        .sum::<f64>()
+            };
+            for t in 0..length {
+                let q: std::vec::Vec<f64> = (0..dim).map(|r| project(pair(0), t, r)).collect();
+                let raw: std::vec::Vec<f64> = (0..length)
+                    .map(|s| {
+                        (0..dim).map(|r| q[r] * project(pair(1), s, r)).sum::<f64>()
+                            / (dim as f64).sqrt()
+                    })
+                    .collect();
+                let largest = raw.iter().copied().fold(f64::MIN, f64::max);
+                let total: f64 = raw.iter().map(|x| (x - largest).exp()).sum();
+                let mixed: std::vec::Vec<f64> = (0..dim)
+                    .map(|r| {
+                        (0..length)
+                            .map(|s| (raw[s] - largest).exp() / total * project(pair(2), s, r))
+                            .sum()
+                    })
+                    .collect();
+
+                for row in 0..dim {
+                    let (w, b) = pair(3);
+                    let expected = input[row * length + t] as f64
+                        + b[row] as f64
+                        + (0..dim)
+                            .map(|f| w[row * dim + f] as f64 * mixed[f])
+                            .sum::<f64>();
+                    let got = output[row * length + t] as f64;
+                    assert!(
+                        (got - expected).abs() < 1e-5 * (1.0 + expected.abs()),
+                        "dim {dim}, t {t}, row {row}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every bench model (if generated) against the golden window the
+    /// training script wrote for it, including the attention model.
+    #[test]
+    fn bench_models_match_pytorch() {
+        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("models/bench");
+
+        for name in ["tiny", "small", "small_attn", "medium", "large"] {
+            let (Ok(file), Ok(golden)) = (
+                std::fs::read(folder.join(std::format!("{name}.ldm"))),
+                std::fs::read(folder.join(std::format!("{name}_golden.bin"))),
+            ) else {
+                continue; // not generated: python3 Scripts/train_classifier.py bench-models
+            };
+
+            // Copy into 16-byte aligned memory, as the firmware stores models.
+            let mut aligned = std::vec![0_u128; file.len().div_ceil(16)];
+            let bytes = unsafe {
+                core::slice::from_raw_parts_mut(aligned.as_mut_ptr().cast::<u8>(), file.len())
+            };
+            bytes.copy_from_slice(&file);
+
+            let model = Model::parse(bytes).unwrap();
+            let mut input = std::vec![0.0; model.input_floats()];
+            let mut scratch = std::vec![0.0; model.scratch_floats()];
+            let check = check_against_golden(&model, &golden, &mut input, &mut scratch).unwrap();
+            assert!(
+                check.max_error < 1e-3 && check.same_answer,
+                "{name}: {check:?}"
+            );
+        }
     }
 }

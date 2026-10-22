@@ -609,6 +609,21 @@ impl<'r, 'v> Recorder<'r, 'v> {
 #[esp_hal::main]
 fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
+
+    // The board's 8 MB octal PSRAM, mapped into the address space through the
+    // data cache. Only the cycle probes (`k`) and the model benchmark (`b`)
+    // use it so far, to measure what PSRAM-resident weights would cost.
+    let psram = esp_hal::psram::Psram::new(
+        peripherals.PSRAM,
+        esp_hal::psram::PsramConfig {
+            mode: esp_hal::psram::PsramMode::OctalSpi,
+            ram_frequency: esp_hal::psram::SpiRamFreq::Freq80m,
+            ..Default::default()
+        },
+    );
+    let (psram_base, psram_bytes) = psram.raw_parts();
+    imu_cycles::PSRAM_BASE.store(psram_base as usize, core::sync::atomic::Ordering::Release);
+    imu_cycles::PSRAM_BYTES.store(psram_bytes, core::sync::atomic::Ordering::Release);
     let mut delay = Delay::new();
 
     // Receive side of the USB serial port, for the single-key commands.
@@ -616,6 +631,11 @@ fn main() -> ! {
 
     println!();
     println!("LegDay IMU bring-up test (branch tim/testing-memory-and-sensors)");
+    println!(
+        "PSRAM: {} kB at 0x{:08X}",
+        psram_bytes / 1_024,
+        psram_base as usize
+    );
     println!("I2C: A4/GPIO11 SDA, A5/GPIO12 SCL @ 400 kHz | ADC: A0-A3 pressure");
     println!("SPI: D13/GPIO48 CLK, D12/GPIO47 SO, D11/GPIO38 SI, D10/GPIO21 CS");
     println!("Buttons: D7/GPIO10 RECORD, D8/GPIO17 CATEGORY, D6/GPIO9 DIAG (all to GND)");
@@ -904,7 +924,15 @@ fn main() -> ! {
                     println!("Selected /{}", category.directory());
                 }
 
-                Action::CycleProbes => imu_cycles::run(),
+                Action::CycleProbes => {
+                    // The probes borrow the classifier's scratch for their operands.
+                    let mut none = [0.0_f32; 0];
+                    let scratch = match classifier.as_mut() {
+                        Some(classifier) => classifier.buffers().1,
+                        None => &mut none[..],
+                    };
+                    imu_cycles::run(scratch);
+                }
 
                 Action::ModelBench if recorder.is_active() => {
                     println!("MODEL BENCH ignored while recording")

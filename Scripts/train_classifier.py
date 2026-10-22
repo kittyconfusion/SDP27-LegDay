@@ -17,7 +17,9 @@ the next firmware build runs it on the board and ``cargo test`` checks the
 Rust inference against PyTorch.
 
 ``bench-models`` writes untrained models of increasing size for the
-on-board timing benchmark (diagnostics built with ``--features model-bench``).
+on-board timing benchmark (diagnostics built with ``--features model-bench``),
+each with a golden window so the Rust inference can be checked against
+PyTorch for every layer type, attention included.
 
 What ``train`` produces in the output folder:
 
@@ -341,10 +343,17 @@ def command_bench_models(args) -> None:
     args.output.mkdir(parents=True, exist_ok=True)
     mean = np.zeros(ml.CHANNELS, dtype=np.float32)
     std = np.ones(ml.CHANNELS, dtype=np.float32)
+
+    # One synthetic second of walking, replayed through every model.
+    window = ml.synthetic_recording("WALK", 2.0, np.random.default_rng(0))[: ml.WINDOW_FRAMES]
+    x = torch.from_numpy(ml.windows(ml.frame_channels(window), ml.WINDOW_FRAMES))
+
     for name, width, attention in BENCH_MODELS:
         model = ml.build_model(len(ml.CATEGORIES), width, attention).eval()
         path = args.output / f"{name}.ldm"
         ml.export_model(path, model, mean, std, list(ml.CATEGORIES))
+        with torch.no_grad():
+            ml.export_golden(args.output / f"{name}_golden.bin", window, model(x)[0].numpy())
         print(
             f"{name:<11} width {width:>3}{' +attn' if attention else '      '} "
             f"{ml.count_parameters(model):>9,} params {ml.count_macs(model):>12,} MACs  {path.stat().st_size:>10,} bytes"

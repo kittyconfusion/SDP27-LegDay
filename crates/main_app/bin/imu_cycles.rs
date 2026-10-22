@@ -29,6 +29,7 @@
 
 use core::arch::asm;
 use core::hint::black_box;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use esp_hal::xtensa_lx::timer::get_cycle_count;
 use esp_println::println;
@@ -36,12 +37,22 @@ use esp_println::println;
 /// Loop iterations per probe: long enough that call overhead vanishes.
 const ITERATIONS: u32 = 10_000;
 
-/// 16-byte aligned arrays for the vector-load probes.
-#[repr(C, align(16))]
-struct Aligned16([f32; 1_024]);
+/// Floats in each probe operand.
+const OPERAND_FLOATS: usize = 1_024;
 
-static mut X: Aligned16 = Aligned16([0.5; 1_024]);
-static mut Y: Aligned16 = Aligned16([0.25; 1_024]);
+/// Two 16-byte aligned operands of `OPERAND_FLOATS` carved out of borrowed
+/// memory (the classifier's scratch, so the probes own no RAM of their
+/// own), filled with fixed values. `None` if `memory` is too small.
+fn operands(memory: &mut [f32]) -> Option<(&[f32], &[f32])> {
+    let skip = (16 - memory.as_ptr() as usize % 16) % 16 / 4;
+    let memory = memory.get_mut(skip..skip + 2 * OPERAND_FLOATS)?;
+    let (x, y) = memory.split_at_mut(OPERAND_FLOATS);
+
+    x.fill(0.5);
+    y.fill(0.25);
+
+    Some((x, y))
+}
 
 /// Cycles per iteration of `body`, measured over `ITERATIONS`.
 fn per_iteration(body: impl FnOnce()) -> f32 {
@@ -136,8 +147,8 @@ fn probe_add_latency() -> f32 {
 
 /// Load a float from internal RAM, then use it right away (load-use).
 #[esp_hal::ram]
-fn probe_load_use() -> f32 {
-    let pointer = unsafe { core::ptr::addr_of!(X.0).cast::<f32>() };
+fn probe_load_use(x: &[f32]) -> f32 {
+    let pointer = x.as_ptr();
     per_iteration(|| unsafe {
         asm!(
             ".balign 8", "nop", "nop.n",
@@ -156,13 +167,8 @@ fn probe_load_use() -> f32 {
 /// 32-bit loads (8 loads + 4 madd.s + 2 pointer adds per 4 multiply-adds).
 /// Returns cycles per multiply-add.
 #[esp_hal::ram]
-fn probe_dot_scalar_loads() -> f32 {
-    let (x, y) = unsafe {
-        (
-            core::ptr::addr_of!(X.0).cast::<f32>(),
-            core::ptr::addr_of!(Y.0).cast::<f32>(),
-        )
-    };
+fn probe_dot_scalar_loads(x: &[f32], y: &[f32]) -> f32 {
+    let (x, y) = (x.as_ptr(), y.as_ptr());
     let groups = 256_u32; // 1,024 floats in groups of 4
     let start = get_cycle_count();
     for _ in 0..ITERATIONS / 256 {
@@ -201,13 +207,8 @@ fn probe_dot_scalar_loads() -> f32 {
 /// ESP-DSP's ESP32-S3 dot-product loop, verbatim: 128-bit vector loads
 /// (four floats each) and four madd.s. Returns cycles per multiply-add.
 #[esp_hal::ram]
-fn probe_dot_vector_loads() -> f32 {
-    let (x, y) = unsafe {
-        (
-            core::ptr::addr_of!(X.0).cast::<f32>(),
-            core::ptr::addr_of!(Y.0).cast::<f32>(),
-        )
-    };
+fn probe_dot_vector_loads(x: &[f32], y: &[f32]) -> f32 {
+    let (x, y) = (x.as_ptr(), y.as_ptr());
     let groups = 256_u32;
     let start = get_cycle_count();
     for _ in 0..ITERATIONS / 256 {
@@ -238,8 +239,7 @@ fn probe_dot_vector_loads() -> f32 {
 /// The same four-accumulator dot product written in plain Rust, compiled by
 /// the project's toolchain. Returns cycles per multiply-add.
 #[esp_hal::ram]
-fn probe_dot_compiled() -> f32 {
-    let (x, y) = unsafe { (&*core::ptr::addr_of!(X.0), &*core::ptr::addr_of!(Y.0)) };
+fn probe_dot_compiled(x: &[f32], y: &[f32]) -> f32 {
     let start = get_cycle_count();
     let mut sums = [0.0_f32; 4];
     for _ in 0..ITERATIONS / 256 {
@@ -255,41 +255,58 @@ fn probe_dot_compiled() -> f32 {
     get_cycle_count().wrapping_sub(start) as f32 / macs as f32
 }
 
-/// The vector dot product (the classifier's real kernel, `cnn::dot`) with
-/// one operand read from flash through the data cache, as model weights are.
-/// `span_floats` sets how much flash is swept: small spans stay in the
-/// cache, large ones keep missing it. Returns cycles per multiply-add.
-#[esp_hal::ram]
-fn probe_dot_from_flash(span_floats: usize) -> f32 {
-    use legday_classifier::cnn::{DEMO_MODEL, dot};
+/// Where PSRAM is mapped, set by `main` after `Psram::new` (0 = none).
+pub static PSRAM_BASE: AtomicUsize = AtomicUsize::new(0);
+pub static PSRAM_BYTES: AtomicUsize = AtomicUsize::new(0);
 
-    // The demo model's bytes are 16-byte aligned in flash; read them as floats.
-    let bytes = &DEMO_MODEL.0;
-    let floats = bytes.len() / 4 / 1_024 * 1_024;
-    // SAFETY: DEMO_MODEL is 16-byte aligned (Aligned<[u8]>), at least
-    // `floats * 4` bytes long, and any bit pattern is a valid f32.
-    let flash: &[f32] =
-        unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<f32>(), floats) };
-    let span = span_floats.min(floats);
-    let y = unsafe { &*core::ptr::addr_of!(Y.0) };
+/// PSRAM as a float slice, if it was initialized.
+pub fn psram_floats() -> Option<&'static mut [f32]> {
+    let base = PSRAM_BASE.load(Ordering::Acquire);
+    let bytes = PSRAM_BYTES.load(Ordering::Acquire);
+
+    if base == 0 || bytes < 4 {
+        return None;
+    }
+
+    // SAFETY: `main` stores the range `Psram::raw_parts` returned, which is
+    // mapped, 4-byte aligned memory used for nothing else in this firmware.
+    // Callers use it one at a time from the main loop.
+    Some(unsafe { core::slice::from_raw_parts_mut(base as *mut f32, bytes / 4) })
+}
+
+/// The vector dot product (the classifier's real kernel, `cnn::dot`) with
+/// one operand in external memory (flash or PSRAM), read through the data
+/// cache as model weights are. `span_floats` sets how much is swept: a small
+/// span stays in the cache, a large one keeps missing it. Returns cycles per
+/// multiply-add.
+#[esp_hal::ram]
+fn probe_dot_external(external: &[f32], y: &[f32], span_floats: usize) -> f32 {
+    let span = span_floats.min(external.len() / 1_024 * 1_024).max(1_024);
 
     let chunks = 64;
     let start = get_cycle_count();
     let mut total = 0.0_f32;
     for round in 0..chunks {
-        // Walk through `span` floats of flash in 1,024-float pieces.
+        // Walk through `span` floats in 1,024-float pieces.
         let offset = (round * 1_024) % span;
-        total += dot(&flash[offset..offset + 1_024], y);
+        total += legday_classifier::cnn::dot(&external[offset..offset + 1_024], y);
     }
     black_box(total);
     get_cycle_count().wrapping_sub(start) as f32 / (chunks * 1_024) as f32
 }
 
+/// The demo model's bytes in flash, viewed as floats (16-byte aligned).
+fn flash_floats() -> &'static [f32] {
+    let bytes = &legday_classifier::cnn::DEMO_MODEL.0;
+    // SAFETY: DEMO_MODEL is 16-byte aligned (Aligned<[u8]>), at least
+    // `len / 4 * 4` bytes long, and any bit pattern is a valid f32.
+    unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<f32>(), bytes.len() / 4) }
+}
+
 /// `cnn::dot` with both operands in internal RAM, through the same call
 /// path as the classifier. Returns cycles per multiply-add.
 #[esp_hal::ram]
-fn probe_dot_sram_via_cnn() -> f32 {
-    let (x, y) = unsafe { (&*core::ptr::addr_of!(X.0), &*core::ptr::addr_of!(Y.0)) };
+fn probe_dot_sram_via_cnn(x: &[f32], y: &[f32]) -> f32 {
     let start = get_cycle_count();
     let mut total = 0.0_f32;
     for _ in 0..64 {
@@ -299,10 +316,55 @@ fn probe_dot_sram_via_cnn() -> f32 {
     get_cycle_count().wrapping_sub(start) as f32 / (64 * 1_024) as f32
 }
 
-/// Runs every probe and prints the table.
-pub fn run() {
+/// Reports how the flash controller (SPI0, which serves the cache) is set
+/// up right now: its read mode and clock divider. Read straight from the
+/// hardware registers, so it shows what the bootloader actually did, not
+/// what the image header asked for.
+fn print_flash_mode() {
+    // SPI0 = 0x6000_3000. CTRL (0x08): read-mode bits. CLOCK (0x14): divider.
+    // CORE_CLK_SEL (0xEC... not needed): the MSPI core clock is 80 MHz here.
+    const SPI0_CTRL: *const u32 = 0x6000_3008 as *const u32;
+    const SPI0_CLOCK: *const u32 = 0x6000_3014 as *const u32;
+
+    // SAFETY: reading two always-present, read-safe hardware registers.
+    let (ctrl, clock) = unsafe { (SPI0_CTRL.read_volatile(), SPI0_CLOCK.read_volatile()) };
+
+    let mode = if ctrl & (1 << 24) != 0 {
+        "QIO (4 lines, address + data)"
+    } else if ctrl & (1 << 20) != 0 {
+        "QOUT (4 lines, data only)"
+    } else if ctrl & (1 << 23) != 0 {
+        "DIO (2 lines, address + data)"
+    } else if ctrl & (1 << 14) != 0 {
+        "DOUT (2 lines, data only)"
+    } else {
+        "single line"
+    };
+
+    let divider = if clock & (1 << 31) != 0 {
+        1
+    } else {
+        ((clock >> 16) & 0xff) + 1
+    };
+
+    println!(
+        "  flash controller: {} | clock divider {} (CTRL 0x{:08X}, CLOCK 0x{:08X})",
+        mode, divider, ctrl, clock
+    );
+}
+
+/// Runs every probe and prints the table. `scratch` is borrowed memory for
+/// the probe operands (the classifier's scratch; 8 kB of it is used).
+pub fn run(scratch: &mut [f32]) {
     println!();
     println!("CPU cycle probes (hand-written assembly in IRAM, hardware loops)");
+
+    let Some((x, y)) = operands(scratch) else {
+        println!("  (needs 8 kB of borrowed scratch; the classifier is disabled)");
+        return;
+    };
+
+    print_flash_mode();
     println!(
         "  loop overhead (nop)                 {:>5.2} cycles/iteration",
         probe_nop()
@@ -325,34 +387,55 @@ pub fn run() {
     );
     println!(
         "  lsi load -> add.s use               {:>5.2} cycles",
-        probe_load_use()
+        probe_load_use(x)
     );
     println!();
     println!("  dot product, cycles per multiply-add:");
     println!(
         "    compiled Rust, four sums          {:>5.2}",
-        probe_dot_compiled()
+        probe_dot_compiled(x, y)
     );
     println!(
         "    assembly, 32-bit loads            {:>5.2}",
-        probe_dot_scalar_loads()
+        probe_dot_scalar_loads(x, y)
     );
     println!(
         "    assembly, ESP-DSP vector loads    {:>5.2}",
-        probe_dot_vector_loads()
+        probe_dot_vector_loads(x, y)
     );
     // Warm the cache once, then time: 4 kB stays cached, 128 kB does not fit.
-    let _ = probe_dot_from_flash(1_024);
+    let flash = flash_floats();
+    let _ = probe_dot_external(flash, y, 1_024);
     println!(
         "    cnn::dot, one operand in flash, 4 kB (cached)    {:>5.2}",
-        probe_dot_from_flash(1_024)
+        probe_dot_external(flash, y, 1_024)
     );
     println!(
         "    cnn::dot, one operand in flash, 128 kB (missing) {:>5.2}",
-        probe_dot_from_flash(32_768)
+        probe_dot_external(flash, y, 32_768)
     );
+
+    if let Some(psram) = psram_floats() {
+        // Fill 128 kB of PSRAM, then sweep it the same way.
+        for (index, value) in psram[..32_768].iter_mut().enumerate() {
+            *value = (index % 13) as f32 * 0.5;
+        }
+        let _ = probe_dot_external(psram, y, 1_024);
+        println!(
+            "    cnn::dot, one operand in PSRAM, 4 kB (cached)    {:>5.2}",
+            probe_dot_external(psram, y, 1_024)
+        );
+        println!(
+            "    cnn::dot, one operand in PSRAM, 128 kB (missing) {:>5.2}",
+            probe_dot_external(psram, y, 32_768)
+        );
+    } else {
+        println!("    (PSRAM not initialized)");
+    }
+
     println!(
         "    cnn::dot, both in SRAM                           {:>5.2}",
-        probe_dot_sram_via_cnn()
+        probe_dot_sram_via_cnn(x, y)
     );
+    print_flash_mode();
 }

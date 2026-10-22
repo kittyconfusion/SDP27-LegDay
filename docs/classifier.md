@@ -173,11 +173,50 @@ C does no better at `-Os`: their published benchmark (`esp_bm_results.csv`)
 shows 14 cycles per multiply-add for C at `-Os`, 5 at `-O2`, 1.5 for their
 assembly. Building our firmware at `opt-level = 3` changed nothing.
 
+Can the compiler be made to do it? Partly. Tested on our toolchain
+(October 22, 2026): `core::f32::math::mul_add`, or the fast-math
+`fmul_algebraic` / `fadd_algebraic`, do make LLVM emit `madd.s`; no
+compiler change is needed for the fused instruction. But even with four
+explicit accumulators the compiled loop is 20 instructions per 4
+multiply-adds (single-float loads, extra address arithmetic, a branch),
+about 5 cycles each. LLVM's Xtensa backend never generates the S3's
+128-bit loads or hardware loops; teaching it to would mean writing
+auto-vectorization for a vendor extension inside Espressif's LLVM fork.
+Espressif itself does not do that: ESP-DSP and ESP-NN ship hand-written
+assembly kernels, which is what `cnn::dot` is.
+
 **Fix:** `cnn::dot` runs Espressif's loop, unchanged, through Rust inline
-assembly on the S3, and plain Rust elsewhere. Convolutions are rewritten as
-dot products: gather each output step's inputs into a contiguous column,
-then `bias + dot(filter, column)`. Model files pad every weight array to 16
-bytes so the vector loads can read them in place.
+assembly on the S3, and plain Rust elsewhere. The assembly is the
+`xtensa::dot_vector` function at the bottom of
+`crates/legday-classifier/src/cnn.rs` (the cycle probes in `imu_cycles.rs`
+are the same style). It is genuine Xtensa machine code: the `asm!` block's
+strings are instructions the assembler encodes one for one, and Rust only
+fills in which registers hold the pointers, count and sums. Per 4 floats:
+
+```text
+loopnez groups, end                    ; hardware loop, no branch per pass
+  ee.ldf.128.ip f11,f10,f9,f8, a, 16   ; 4 floats of a, a += 16 bytes
+  ee.ldf.128.ip f7,f6,f5,f4,   b, 16   ; 4 floats of b, b += 16 bytes
+  madd.s sum0, f4, f8                  ; sum0 += a0*b0
+  madd.s sum1, f5, f9                  ; four independent sums, so a new
+  madd.s sum2, f6, f10                 ; madd.s starts every cycle while
+  madd.s sum3, f7, f11                 ; earlier ones finish
+end:
+```
+
+Six instructions per 4 multiply-adds, 1.5 cycles each. Every layer is
+then expressed as dot products:
+
+- **Convolutions:** gather each output step's inputs into a contiguous
+  column, then `bias + dot(filter, column)`.
+- **Dense:** one `dot` per output.
+- **Attention:** each time step gathered into a vector, then one `dot`
+  per projection row; Q and K stored by time step so a score is one `dot`;
+  V stored transposed and padded to a multiple of 4 so each mixed feature
+  is one `dot`. Checked against the formula in f64 and against PyTorch.
+
+Model files pad every weight array to 16 bytes so the vector loads can
+read them in place.
 
 One trap found on the way: the hardware loop needs its body aligned in
 memory. GNU's assembler pads for that automatically; LLVM's does not, and a
@@ -190,16 +229,26 @@ misaligned loop crashed the board. The kernel pads explicitly.
 | data already in cache | 1.57 |
 | data not in cache, flash at espflash's default DIO 40 MHz | 118.6 |
 | data not in cache, flash at DIO 80 MHz | 62.1 |
+| data not in cache, flash at QIO 80 MHz | 37.0 |
 | both operands in internal RAM | 1.58 |
 
 Reading from flash is fine while cached and very slow on a miss.
 
-**Fixes:** `crates/scripts/firmware.sh` now flashes at DIO 80 MHz (twice the
-bandwidth for every cache miss, code included). QIO would be faster again,
-but the bootloader espflash bundles does not set the flash's quad-enable bit
-and the board boot-loops; reflashing in DIO recovers it. The firmware also
-copies the demo model's weights (149 kB) into internal RAM at start-up,
-leaving about 51 kB for the stack.
+**Fixes:**
+
+- **80 MHz:** the flash clock is 80 MHz instead of 40.
+- **QIO:** the flash is read over 4 data lines instead of 2. The chip's
+  boot ROM cannot start in QIO (writing QIO into the image header
+  boot-loops the board), so the header stays DIO and Espressif's own QIO
+  bootloader, the one Arduino uses for this board, switches the flash
+  controller to QIO before our firmware starts. Details and provenance:
+  `crates/scripts/bootloader/README.md`. `cargo run` (through
+  `crates/scripts/espflash-runner.sh`) and `crates/scripts/firmware.sh`
+  both flash it. The `k` key prints the live mode from the controller's
+  registers.
+- **Weights in RAM:** the firmware copies the demo model's weights
+  (149 kB) into internal RAM at start-up. Whether that is still needed
+  under QIO is the open measurement below.
 
 ### Results
 
@@ -211,9 +260,15 @@ leaving about 51 kB for the stack.
 | medium | 196,646 | 768 kB | 472 ms | 153 ms | 101 ms | |
 | large | 1,031,326 | 4,029 kB | 2,391 ms | 1,728 ms | 1,339 ms | |
 
+Not yet measured: the same table with QIO flash, with weights in PSRAM,
+and with attention on `dot`. Build with `--features model-bench`, press
+`b`; every row also says whether the board's answer matches PyTorch for
+that model's golden window.
+
 Every step is checked: at start-up the board replays a window exported by
 the training script and compares with PyTorch (maximum error 7e-7), and
-`cargo test` does the same on the Mac.
+`cargo test` does the same on the Mac for the demo model and every bench
+model.
 
 Preprocessing the window adds 3.5 ms. The firmware still caps the
 classifier at half the CPU, so it can never starve sensing; at 13 ms it runs
@@ -221,16 +276,72 @@ classifier at half the CPU, so it can never starve sensing; at 13 ms it runs
 
 ### What is left
 
-- **Models too big for RAM** (medium and up) are limited by flash. The 8 MB
-  PSRAM, once enabled, is a faster home for them than flash; int8 weights
-  would cut the bytes four times.
-- **Attention** still uses plain loops (about 10 cycles per multiply-add);
-  it can be rewritten on `dot` the same way.
+- **Where the weights live** (see the memory budget below): internal RAM,
+  flash under QIO, or PSRAM, decided by the `b` measurements.
 - **int8 with the S3's integer vector instructions** (ESP-NN / ESP-DL)
-  is the next large step: Espressif's benchmark shows an int8 dot product at
-  about 0.4 cycles per multiply-add, four times the float kernel.
+  is the next large step. The S3's real SIMD (`ee.vmulas`, 16 multiplies
+  per instruction) exists only for 8- and 16-bit integers, not floats.
+  Espressif's benchmark shows an int8 dot product at about 0.4 cycles per
+  multiply-add, four times the float kernel, and the weights shrink four
+  times (the demo model to about 37 kB).
 - **The second core**: the classifier belongs there, away from sensing and
   control.
+
+## Memory budget
+
+The ESP32-S3 has 512 kB of internal SRAM, but not all of it is ours:
+
+| Region | Size | Used for |
+| --- | --- | --- |
+| SRAM0 | 32 kB | instruction cache for flash code |
+| SRAM2 | 64 kB | data cache for flash and PSRAM data |
+| top of SRAM1 | ~10 kB | the boot ROM's own data |
+| bootloader region ("dram2") | 73 kB | free once the firmware runs: the place for a heap (Wi-Fi / BLE) |
+| **main data region** | **334 kB** | everything below |
+
+The 32 + 64 kB of caches are what make flash and PSRAM usable at all; the
+8 MB PSRAM and 16 MB flash sit outside, behind those caches.
+
+**The main data region, measured from the linked default build**
+(`xtensa-esp32s3-elf-nm -S --size-sort`, October 22, 2026):
+
+| Item | Bytes | What it is |
+| --- | --- | --- |
+| `MODEL_IN_RAM` | 149,360 | demo weights copied from flash |
+| classifier `SCRATCH` | 50,692 | activations and convolution columns (32 kB tile) |
+| `WINDOW` | 27,016 | one second of 120-byte frames |
+| classifier `INPUT` | 12,004 | the 40 x 75 model input |
+| `BATCH` | 7,688 | SD write batch |
+| other `.bss` / `.data` | 8,160 | esp-hal driver state and tables |
+| code in RAM (`.rwtext`, 10,264 + alignment) | 11,288 | interrupt handlers, start-up, PSRAM init, cycle probes |
+| **stack** | **75,544** | what is left |
+
+Everything the firmware links is code it calls: the linker drops unused
+functions. Diagnostics and probes cost flash, not RAM, apart from the
+buffers listed and about 1 kB of probe code that runs from RAM on purpose.
+The classifier (model copy, scratch, input) is four fifths of what is
+used, and the model copy alone is 149 kB. Without it the firmware would
+use about 115 kB of the 334.
+
+### Decisions and their cost
+
+A running record of what was traded for what.
+
+| Date | Change | RAM | Cost / reason |
+| --- | --- | --- | --- |
+| Oct 22 | Copy demo weights to RAM | -149 kB | 22 -> 13 ms per inference; revisit once QIO and PSRAM timings are in |
+| Oct 22 | Convolution column tile 64 -> 32 kB | +32 kB | none measurable: tiles exist so each filter is read once per tile, which only matters while filters come from flash; same answer (`small_column_budget_gives_the_same_answer`) |
+| Oct 22 | Removed the old prototype-classifier timing from diagnostics | +19 kB | the firmware runs the CNN, which section 7 times |
+| Oct 22 | Cycle probes borrow the classifier's scratch | +8 kB | none: the probes and the classifier never run at once |
+| Oct 22 | PSRAM driver enabled | -3.3 kB | its init code must run from RAM; drop it if PSRAM is not used |
+
+**Room for what is coming:** four IMUs and four pressure channels are
+already in the frame layout and the window size, so they add no RAM.
+Wi-Fi or BLE need a heap, roughly 64-100 kB (an estimate from
+esp-radio's examples; measure it when the radio code is added); the
+bootloader region provides 73 kB of it without touching the main region. PSRAM
+(8 MB) suits large, not-time-critical data: logs, a longer history, big
+models if they prove fast enough there.
 
 ## On-device training
 

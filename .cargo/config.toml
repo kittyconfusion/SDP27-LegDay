@@ -2,7 +2,9 @@
 include = ["esp-config.toml"]
 
 [target.xtensa-esp32s3-none-elf]
-runner = "espflash flash --baud=921600 --monitor --chip esp32s3 --list-all-ports"
+# Flashes with the QIO bootloader at 80 MHz (about 3x faster flash than
+# espflash's defaults); see crates/scripts/bootloader/README.md.
+runner = "crates/scripts/espflash-runner.sh"
 rustflags = ["-C", "link-arg=-nostartfiles","-C", "link-arg=-Wl,--no-warn-rwx-segments"]
 
 [target.riscv32imac-unknown-none-elf]

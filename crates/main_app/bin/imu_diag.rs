@@ -21,7 +21,7 @@
 //! 4. **Wake costs**: DMP firmware load time, sleep-to-first-sample time,
 //!    whether the DMP firmware survives IMU sleep, and gyro calibration time.
 //! 5. **CPU costs** on the S3: software fusion, packet parsing, frame
-//!    encoding, the pressure ADC, and the prototype classifier.
+//!    encoding, and the pressure ADC (the CNN is timed in section 7).
 //! 6. **Summary**: the measurements projected onto 4-IMU layouts.
 //! 7. **Model sizes**: CNN inference time from ~12k to ~1M parameters.
 //!    Only in a build with `--features model-bench`, after generating the
@@ -32,12 +32,9 @@ use core::hint::black_box;
 use esp_hal::delay::Delay;
 use esp_println::println;
 
-use legday_classifier::{
-    fusion::Madgwick,
-    prototype::{PrototypeClassifier, WINDOW_FEATURES, WindowFeatures},
-};
+use legday_classifier::fusion::Madgwick;
 
-use legday_core::{SensorFrame, WindowBuffer, fused::FusedFrame};
+use legday_core::fused::FusedFrame;
 
 use legday_icm20948::{
     Config as ImuConfig, RAW_FIFO_SAMPLE_BYTES, RawSample,
@@ -45,11 +42,9 @@ use legday_icm20948::{
     regs::bank0,
 };
 
-use static_cell::ConstStaticCell;
+use legday_classifier::cnn::{Aligned, Model, check_against_golden};
 
-use legday_classifier::cnn::{Aligned, Model};
-
-use super::{Imu, PressureInputs, SAMPLE_RATE_DIV, WINDOW_FRAMES, now_us};
+use super::{Imu, PressureInputs, SAMPLE_RATE_DIV, now_us};
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -82,23 +77,9 @@ const UTILIZATION_MARGINAL: f32 = 80.0;
 /// The data-age target from the project brief.
 const TARGET_AGE_MS: f32 = 5.0;
 
-// ---------------------------------------------------------------------------
-// Static buffers for the classifier timing (kept off the stack)
-// ---------------------------------------------------------------------------
-
-/// One second of raw frames, the classifier's input shape.
-static CLASSIFIER_WINDOW: ConstStaticCell<WindowBuffer<WINDOW_FRAMES>> =
-    ConstStaticCell::new(WindowBuffer::new());
-
-/// A six-class prototype model to time `predict` against.
-static CLASSIFIER_MODEL: ConstStaticCell<PrototypeClassifier<6, WINDOW_FEATURES>> =
-    ConstStaticCell::new(PrototypeClassifier::new());
-
-/// Memory the diagnostics need, taken once at boot so the test can run any
-/// number of times (a `ConstStaticCell` can only be taken once).
+/// FIFO read buffers the streaming tests drain into, made once at boot so
+/// the test can run any number of times.
 pub struct Buffers {
-    window: &'static mut WindowBuffer<WINDOW_FRAMES>,
-    model: &'static mut PrototypeClassifier<6, WINDOW_FEATURES>,
     packets: [DmpPacket; PACKETS_PER_CHUNK],
     raw: [RawSample; 32],
 }
@@ -106,8 +87,6 @@ pub struct Buffers {
 impl Buffers {
     pub fn take() -> Self {
         Self {
-            window: CLASSIFIER_WINDOW.take(),
-            model: CLASSIFIER_MODEL.take(),
             packets: [DmpPacket::default(); PACKETS_PER_CHUNK],
             raw: [RawSample::default(); 32],
         }
@@ -819,7 +798,7 @@ fn sample_packet() -> [u8; 40] {
 }
 
 /// Returns the Madgwick update time in µs (used by the summary).
-fn section_cpu(buffers: &mut Buffers, pressure: &mut PressureInputs, period_us: u64) -> f32 {
+fn section_cpu(pressure: &mut PressureInputs, period_us: u64) -> f32 {
     println!();
     println!("[5/6] CPU costs on the S3 (240 MHz, one core)");
 
@@ -854,32 +833,6 @@ fn section_cpu(buffers: &mut Buffers, pressure: &mut PressureInputs, period_us: 
         black_box(pressure.read());
     });
 
-    // Prototype classifier: fill one second of synthetic frames, then time
-    // feature extraction over the window and a nearest-centroid prediction.
-    for index in 0..WINDOW_FRAMES {
-        let mut raw = SensorFrame::ZERO;
-        let value = (index % 50) as i16;
-        raw.imus[0].accel = [value, -value, 8_192];
-        raw.imus[0].gyro = [value * 2, 0, -value];
-        raw.pressure_adc = [index as u16; 4];
-        buffers.window.push(raw);
-    }
-
-    let features_us = average_cpu_us(20, |_| {
-        black_box(WindowFeatures::from_window(black_box(&*buffers.window)));
-    });
-
-    let features = WindowFeatures::from_window(buffers.window).unwrap();
-    for class in 0..6 {
-        let mut shifted = features.values;
-        shifted[0] += class as i32 * 100;
-        buffers.model.observe(class, &shifted);
-    }
-
-    let predict_us = average_cpu_us(200, |_| {
-        black_box(buffers.model.predict(black_box(&features.values)));
-    });
-
     // What these cost per second at 4 IMUs and 225 Hz.
     let samples_per_s = 1_000_000.0 / period_us as f32;
     let fusion_load = madgwick_us * 4.0 * samples_per_s / 1e6 * 100.0;
@@ -891,11 +844,6 @@ fn section_cpu(buffers: &mut Buffers, pressure: &mut PressureInputs, period_us: 
     println!("  DMP packet parse:             {:>8.2} us", parse_us);
     println!("  120-byte frame encode:        {:>8.2} us", encode_us);
     println!("  4 pressure ADC reads:         {:>8.2} us", pressure_us);
-    println!(
-        "  classifier features (1 s):    {:>8.1} us  ({} frames x 28 channels)",
-        features_us, WINDOW_FRAMES
-    );
-    println!("  classifier predict (6 class): {:>8.1} us", predict_us);
 
     madgwick_us
 }
@@ -1042,39 +990,55 @@ fn section_summary(
 mod bench_models {
     use legday_classifier::cnn::Aligned;
 
-    pub static TINY: &Aligned<[u8]> = &Aligned(*include_bytes!(
-        "../../legday-classifier/models/bench/tiny.ldm"
-    ));
-    pub static SMALL: &Aligned<[u8]> = &Aligned(*include_bytes!(
-        "../../legday-classifier/models/bench/small.ldm"
-    ));
-    pub static SMALL_ATTENTION: &Aligned<[u8]> = &Aligned(*include_bytes!(
-        "../../legday-classifier/models/bench/small_attn.ldm"
-    ));
-    pub static MEDIUM: &Aligned<[u8]> = &Aligned(*include_bytes!(
-        "../../legday-classifier/models/bench/medium.ldm"
-    ));
-    pub static LARGE: &Aligned<[u8]> = &Aligned(*include_bytes!(
-        "../../legday-classifier/models/bench/large.ldm"
-    ));
+    /// One model file and the golden window the training script wrote for it.
+    macro_rules! bench {
+        ($name:literal) => {
+            (
+                &Aligned(*include_bytes!(concat!(
+                    "../../legday-classifier/models/bench/",
+                    $name,
+                    ".ldm"
+                ))),
+                include_bytes!(concat!(
+                    "../../legday-classifier/models/bench/",
+                    $name,
+                    "_golden.bin"
+                )),
+            )
+        };
+    }
+
+    pub type Bench = (&'static Aligned<[u8]>, &'static [u8]);
+
+    pub static TINY: Bench = bench!("tiny");
+    pub static SMALL: Bench = bench!("small");
+    pub static SMALL_ATTENTION: Bench = bench!("small_attn");
+    pub static MEDIUM: Bench = bench!("medium");
+    pub static LARGE: Bench = bench!("large");
 }
 
+/// Name, model file, and golden window (frames plus PyTorch's answer).
+type BenchModel = (&'static str, &'static Aligned<[u8]>, &'static [u8]);
+
 #[cfg(feature = "model-bench")]
-fn bench_models() -> [(&'static str, &'static Aligned<[u8]>); 5] {
+fn bench_models() -> [BenchModel; 5] {
+    use bench_models::*;
+
     [
-        ("tiny", bench_models::TINY),
-        ("small", bench_models::SMALL),
-        ("small+attention", bench_models::SMALL_ATTENTION),
-        ("medium", bench_models::MEDIUM),
-        ("large", bench_models::LARGE),
+        ("tiny", TINY.0, TINY.1),
+        ("small", SMALL.0, SMALL.1),
+        ("small+attention", SMALL_ATTENTION.0, SMALL_ATTENTION.1),
+        ("medium", MEDIUM.0, MEDIUM.1),
+        ("large", LARGE.0, LARGE.1),
     ]
 }
 
 #[cfg(not(feature = "model-bench"))]
-fn bench_models() -> [(&'static str, &'static Aligned<[u8]>); 1] {
+fn bench_models() -> [BenchModel; 1] {
     [(
         "demo (build with --features model-bench for the size sweep)",
         legday_classifier::cnn::DEMO_MODEL,
+        legday_classifier::cnn::DEMO_GOLDEN,
     )]
 }
 
@@ -1220,11 +1184,11 @@ fn section_model_sizes((input, scratch): (&mut [f32], &mut [f32])) {
     println!();
     println!("[7/7] CNN model sizes (weights in flash, one core at 240 MHz)");
     println!(
-        "  {:<22} {:>10} {:>12} {:>10} {:>11} {:>9} {:>8}",
-        "model", "params", "MACs", "flash", "time", "MMAC/s", "budget"
+        "  {:<22} {:>10} {:>12} {:>10} {:>11} {:>9} {:>8}  {}",
+        "model", "params", "MACs", "flash", "time", "MMAC/s", "budget", "vs PyTorch"
     );
 
-    for (name, bytes) in bench_models() {
+    for (name, bytes, golden) in bench_models() {
         let model = match Model::parse(&bytes.0) {
             Ok(model) => model,
             Err(error) => {
@@ -1243,6 +1207,13 @@ fn section_model_sizes((input, scratch): (&mut [f32], &mut [f32])) {
             continue;
         }
 
+        // First the answer: replay the golden window and compare with PyTorch.
+        let verdict = match check_against_golden(&model, golden, input, scratch) {
+            Ok(check) if check.same_answer && check.max_error < 1e-3 => "same",
+            Ok(_) => "DIFFERENT",
+            Err(_) => "no golden",
+        };
+
         // Timing does not depend on the values, so a constant input will do.
         let input = &mut input[..model.input_floats()];
         input.fill(0.5);
@@ -1260,16 +1231,65 @@ fn section_model_sizes((input, scratch): (&mut [f32], &mut [f32])) {
         black_box(logits);
 
         println!(
-            "  {:<22} {:>10} {:>12} {:>7} kB {:>8.1} ms {:>9.1} {:>7.0}%",
+            "  {:<22} {:>10} {:>12} {:>7} kB {:>8.1} ms {:>9.1} {:>7.0}%  {}",
             name,
             model.parameters(),
             model.macs(),
             bytes.0.len() / 1024,
             us / 1_000.0,
             model.macs() as f32 / us,
-            us / BUDGET_US * 100.0
+            us / BUDGET_US * 100.0,
+            verdict
         );
+
+        // The same model with its weights copied into PSRAM.
+        if let Some(psram_us) = time_from_psram(&bytes.0, input, scratch, repeats) {
+            println!(
+                "  {:<22} {:>10} {:>12} {:>10} {:>8.1} ms {:>9.1} {:>7.0}%",
+                "  ...weights in PSRAM",
+                "",
+                "",
+                "",
+                psram_us / 1_000.0,
+                model.macs() as f32 / psram_us,
+                psram_us / BUDGET_US * 100.0
+            );
+        }
     }
+}
+
+/// Copies a model file into PSRAM (16-byte aligned) and times inference
+/// from there. Returns microseconds per inference, or `None` without PSRAM.
+fn time_from_psram(
+    bytes: &[u8],
+    input: &mut [f32],
+    scratch: &mut [f32],
+    repeats: u32,
+) -> Option<f32> {
+    let psram = super::imu_cycles::psram_floats()?;
+
+    if bytes.len() > psram.len() * 4 {
+        return None;
+    }
+
+    // PSRAM's base is page aligned (so 16-byte aligned); copy the file there.
+    // SAFETY: viewing the f32 slice's own bytes; same memory and length.
+    let psram_bytes: &mut [u8] = unsafe {
+        core::slice::from_raw_parts_mut(psram.as_mut_ptr().cast::<u8>(), psram.len() * 4)
+    };
+    psram_bytes[..bytes.len()].copy_from_slice(bytes);
+
+    let model = Model::parse(&psram_bytes[..bytes.len()]).ok()?;
+    let input = &mut input[..model.input_floats()];
+    let mut logits = [0.0_f32; 16];
+    let _ = model.infer(input, scratch, &mut logits[..model.classes], None);
+
+    let started = now_us();
+    for _ in 0..repeats {
+        let _ = model.infer(input, scratch, &mut logits[..model.classes], None);
+    }
+    black_box(logits);
+    Some((now_us() - started) as f32 / repeats as f32)
 }
 
 // ---------------------------------------------------------------------------
@@ -1297,7 +1317,7 @@ pub fn run(
     let costs = section_streaming(imu, delay, buffers, period_us);
     let stalls = section_stalls(imu, delay, buffers);
     section_wake(imu, delay, buffers);
-    let madgwick_us = section_cpu(buffers, pressure, period_us);
+    let madgwick_us = section_cpu(pressure, period_us);
     section_summary(&bus, &costs, &stalls, madgwick_us, period_us);
     section_model_sizes(model_buffers);
 
