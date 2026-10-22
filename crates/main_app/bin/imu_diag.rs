@@ -246,6 +246,7 @@ fn start_raw(imu: &mut Imu, delay: &mut Delay) {
         sample_rate_div: SAMPLE_RATE_DIV,
         ..ImuConfig::default()
     };
+
     imu.configure(&config).unwrap();
     imu.start_raw_fifo().unwrap();
 }
@@ -367,6 +368,7 @@ fn section_bus_primitives(imu: &mut Imu, delay: &mut Delay) -> BusCosts {
     let write_us = average_us(imu, 200, |imu| {
         imu.write_reg(0, bank0::FIFO_EN_1, 0).unwrap()
     });
+
     let count_us = average_us(imu, 200, |imu| {
         imu.fifo_count().unwrap();
     });
@@ -461,6 +463,7 @@ fn run_stream(
         let started = now_us();
 
         let drain = drain_once(imu, path, buffers);
+
         if second_imu {
             emulate_second_imu(imu, drain.payload_bytes);
         }
@@ -1104,12 +1107,13 @@ fn four_sums_in_iram(a: &[f32], b: &[f32], repeats: usize) -> [f32; 4] {
 /// Raw multiply-add speed of several loop shapes on plain SRAM arrays, to
 /// find what limits the CNN.
 ///
-/// Measured October 22, 2026: every shape lands at 12-20 million per
-/// second (25 from IRAM), about 9-12 cycles each at 240 MHz. The cause is
-/// the compiler's instruction scheduling for this in-order CPU: each load,
-/// multiply and add is placed right after the instruction it depends on, so
-/// the CPU stalls. Espressif's hand-written assembly (ESP-DSP) reaches about
-/// one cycle per multiply-add on the same chip.
+/// Measured October 22, 2026: every compiled shape lands at 12-20 million
+/// per second (25 from IRAM), about 9-12 cycles each at 240 MHz. The
+/// floating-point unit needs 4 cycles per result, and the compiler emits a
+/// separate multiply and add and places each right after the instruction it
+/// depends on, so the CPU stalls. The cycle probes (`k` key, imu_cycles.rs)
+/// show Espressif's ESP-DSP loop at 1.5 cycles per multiply-add; the
+/// classifier now uses that loop (`legday_classifier::cnn::dot`).
 fn kernel_microbench(scratch: &mut [f32]) {
     const N: usize = 1_024;
     const REPEATS: usize = 200;

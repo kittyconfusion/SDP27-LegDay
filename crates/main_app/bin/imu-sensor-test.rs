@@ -1,5 +1,8 @@
 #![no_std]
 #![no_main]
+// Inline assembly on Xtensa is a nightly-only feature (the esp toolchain is
+// nightly). Used by the cycle probes in imu_cycles.rs.
+#![feature(asm_experimental_arch)]
 
 //! # IMU bring-up test firmware
 //!
@@ -106,6 +109,9 @@ mod imu_pipeline;
 
 /// Runs the CNN on the live window and reports its answer and timing.
 mod imu_classifier;
+
+/// Cycle-level probes of the chip's arithmetic (the `k` key).
+mod imu_cycles;
 
 use imu_pipeline::Pipeline;
 
@@ -251,6 +257,7 @@ enum Action {
     Pause,
     Diagnostics,
     ModelBench,
+    CycleProbes,
     Help,
 }
 
@@ -858,6 +865,7 @@ fn main() -> ! {
                 b'p' => Some(Action::Pause),
                 b'x' => Some(Action::Diagnostics),
                 b'b' => Some(Action::ModelBench),
+                b'k' => Some(Action::CycleProbes),
                 b'h' | b'?' => Some(Action::Help),
                 _ => None,
             };
@@ -895,6 +903,8 @@ fn main() -> ! {
                     category = category.next();
                     println!("Selected /{}", category.directory());
                 }
+
+                Action::CycleProbes => imu_cycles::run(),
 
                 Action::ModelBench if recorder.is_active() => {
                     println!("MODEL BENCH ignored while recording")

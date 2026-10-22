@@ -40,16 +40,32 @@ const LAYER_GLOBAL_AVG_POOL: u32 = 2;
 const LAYER_DENSE: u32 = 3;
 const LAYER_SELF_ATTENTION: u32 = 4;
 
-/// Wraps bytes so they are 4-byte aligned, which lets `f32` weights be read
-/// straight out of an `include_bytes!` model:
+/// Wraps bytes so they are 16-byte aligned, which lets `f32` weights be read
+/// straight out of an `include_bytes!` model, and lets the S3 load them four
+/// at a time with its 128-bit vector load (which needs 16-byte alignment):
 /// `static MODEL: &Aligned<[u8]> = &Aligned(*include_bytes!("model.ldm"));`
-#[repr(C, align(4))]
+#[repr(C, align(16))]
 pub struct Aligned<Bytes: ?Sized>(pub Bytes);
 
 /// The model the firmware runs by default. Replace `models/demo.ldm` (or run
 /// `train_classifier.py train ... --install-demo`) and rebuild to change it.
 /// The committed one was trained on synthetic data.
 pub static DEMO_MODEL: &Aligned<[u8]> = &Aligned(*include_bytes!("../models/demo.ldm"));
+
+/// One window exported by the training script together with the logits
+/// PyTorch computed for it. [`check_against_golden`] replays it, on the Mac
+/// in `cargo test` and on the board at start-up.
+pub static DEMO_GOLDEN: &[u8] = include_bytes!("../models/demo_golden.bin");
+
+/// Size of the demo model file, for callers that copy it into RAM.
+pub const DEMO_MODEL_BYTES: usize = include_bytes!("../models/demo.ldm").len();
+
+/// Default floats of scratch the convolution may use to gather input
+/// columns (see `conv_relu`). Larger means each layer's weights are read
+/// fewer times; 16,384 floats (64 kB) covers the demo model's first layer in
+/// two passes. That matters when weights are read from flash; with weights
+/// in RAM a smaller budget costs nothing (see [`Model::set_column_budget`]).
+pub const COLUMN_BUDGET_FLOATS: usize = 16_384;
 
 /// Why a model file was rejected or an inference could not run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +148,10 @@ pub struct Model<'m> {
     max_activation: usize,
     /// Extra room the attention layer needs (Q, K, V, one score row, one vector).
     attention_floats: usize,
+    /// Room for gathered input columns in the convolution, for the current
+    /// budget, and the budget itself.
+    column_floats: usize,
+    column_budget: usize,
     /// Size of the averaged features fed to the final dense layer.
     embedding_size: usize,
     parameters: usize,
@@ -142,6 +162,8 @@ pub struct Model<'m> {
 struct Reader<'m> {
     bytes: &'m [u8],
     position: usize,
+    /// Version 2 files pad every float array to a 16-byte boundary.
+    pad_floats_to_16: bool,
 }
 
 impl<'m> Reader<'m> {
@@ -169,6 +191,11 @@ impl<'m> Reader<'m> {
 
     /// `count` f32 values, borrowed in place.
     fn f32s(&mut self, count: usize) -> Result<&'m [f32], ModelError> {
+        if self.pad_floats_to_16 {
+            let padding = (16 - self.position % 16) % 16;
+            self.take(padding)?;
+        }
+
         let bytes = self.take(count.checked_mul(4).ok_or(ModelError::Truncated)?)?;
 
         if bytes.as_ptr() as usize % core::mem::align_of::<f32>() != 0 {
@@ -196,16 +223,23 @@ impl<'m> Model<'m> {
     /// Parses a `.ldm` file and checks every layer's shape against the one
     /// before it, so a bad file is rejected here rather than mid-inference.
     pub fn parse(bytes: &'m [u8]) -> Result<Self, ModelError> {
-        let mut reader = Reader { bytes, position: 0 };
+        let mut reader = Reader {
+            bytes,
+            position: 0,
+            pad_floats_to_16: false,
+        };
 
         if reader.take(4)? != b"LDM1" {
             return Err(ModelError::BadMagic);
         }
 
+        // Version 1: float arrays only 4-byte aligned. Version 2: every float
+        // array starts on a 16-byte boundary, for the S3's vector loads.
         let version = reader.u32()?;
-        if version != 1 {
+        if version != 1 && version != 2 {
             return Err(ModelError::UnsupportedVersion(version));
         }
+        reader.pad_floats_to_16 = version >= 2;
 
         let channels = reader.usize()?;
         let steps = reader.usize()?;
@@ -232,6 +266,8 @@ impl<'m> Model<'m> {
             layers: [None; MAX_LAYERS],
             max_activation: 0,
             attention_floats: 0,
+            column_floats: 0,
+            column_budget: COLUMN_BUDGET_FLOATS,
             embedding_size: 0,
             parameters: 0,
             macs: 0,
@@ -265,6 +301,9 @@ impl<'m> Model<'m> {
                     features = output;
                     model.parameters += weights.len() + bias.len();
                     model.macs += length * output * input * kernel;
+                    model.column_floats = model
+                        .column_floats
+                        .max(column_tile(input * kernel, length, COLUMN_BUDGET_FLOATS).1);
 
                     Layer::ConvRelu {
                         input,
@@ -344,11 +383,42 @@ impl<'m> Model<'m> {
         }
     }
 
+    /// Changes how many floats the convolution may use for gathered input
+    /// columns (default [`COLUMN_BUDGET_FLOATS`]). A smaller budget needs
+    /// less scratch but reads each layer's weights more often, which is only
+    /// expensive when the weights are in flash.
+    pub fn set_column_budget(&mut self, floats: usize) {
+        self.column_budget = floats.max(1);
+        self.column_floats = 0;
+
+        // Recompute the largest tile with the new budget.
+        let mut length = self.steps;
+
+        for layer in self.layers.iter().flatten() {
+            match *layer {
+                Layer::ConvRelu {
+                    input,
+                    kernel,
+                    stride,
+                    dilation,
+                    ..
+                } => {
+                    length = (length - (dilation * (kernel - 1) + 1)) / stride + 1;
+                    let (_, floats) = column_tile(input * kernel, length, self.column_budget);
+                    self.column_floats = self.column_floats.max(floats);
+                }
+                Layer::GlobalAvgPool => length = 1,
+                _ => {}
+            }
+        }
+    }
+
     /// Floats of scratch space [`Model::infer`] needs: two activation
-    /// buffers (each layer reads one and writes the other) plus room for
-    /// attention.
+    /// buffers (each layer reads one and writes the other), room for
+    /// attention, and room for gathered convolution columns (plus 3 floats
+    /// to align those to 16 bytes).
     pub fn scratch_floats(&self) -> usize {
-        2 * self.max_activation + self.attention_floats
+        2 * self.max_activation + self.attention_floats.max(self.column_floats + 3)
     }
 
     /// Length of the model input: `channels x steps`.
@@ -433,7 +503,18 @@ impl<'m> Model<'m> {
                     bias,
                 } => {
                     length = conv_relu(
-                        from, input, length, weights, bias, output, kernel, stride, dilation, to,
+                        from,
+                        input,
+                        length,
+                        weights,
+                        bias,
+                        output,
+                        kernel,
+                        stride,
+                        dilation,
+                        to,
+                        aligned_16(attention_scratch),
+                        self.column_budget,
                     );
                     features = output;
                 }
@@ -502,6 +583,108 @@ impl<'m> Model<'m> {
     }
 }
 
+/// Result of replaying a golden window (see [`check_against_golden`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GoldenCheck {
+    /// Largest difference from PyTorch's logits, relative to `1 + |logit|`.
+    pub max_error: f32,
+    /// Both picked the same class.
+    pub same_answer: bool,
+}
+
+/// Replays a golden file written by the training script (frame count,
+/// 120-byte frames, logit count, PyTorch's logits) through this crate's
+/// preprocessing and inference, and compares the result.
+///
+/// Run on the Mac by `cargo test` and on the board at start-up, so both the
+/// plain-Rust and the ESP32-S3 assembly paths are checked against PyTorch.
+pub fn check_against_golden(
+    model: &Model,
+    golden: &[u8],
+    input: &mut [f32],
+    scratch: &mut [f32],
+) -> Result<GoldenCheck, ModelError> {
+    use legday_core::fused::{FUSED_FRAME_WIRE_BYTES, FusedFrame};
+
+    let read_u32 = |at: usize| -> Result<usize, ModelError> {
+        let bytes = golden.get(at..at + 4).ok_or(ModelError::Truncated)?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize)
+    };
+
+    let frames = read_u32(0)?;
+    let logits_at = 4 + frames * FUSED_FRAME_WIRE_BYTES;
+    let classes = read_u32(logits_at)?;
+
+    if classes != model.classes || classes > 16 {
+        return Err(ModelError::BadOutput);
+    }
+
+    // Decode frames straight from the golden bytes; nothing is copied.
+    let frame_at = |index: usize| {
+        let start = 4 + index * FUSED_FRAME_WIRE_BYTES;
+        let bytes: &[u8; FUSED_FRAME_WIRE_BYTES] = golden
+            .get(start..start + FUSED_FRAME_WIRE_BYTES)?
+            .try_into()
+            .ok()?;
+        Some(FusedFrame::decode_le(bytes))
+    };
+
+    crate::preprocess::frames_input(
+        frame_at,
+        frames,
+        model.channels,
+        model.steps,
+        model.decimation,
+        model.mean,
+        model.std,
+        &mut input[..model.input_floats()],
+    )
+    .map_err(|_| ModelError::BufferSize {
+        needed: model.input_floats(),
+        available: input.len(),
+    })?;
+
+    let mut logits = [0.0_f32; 16];
+    model.infer(
+        &input[..model.input_floats()],
+        scratch,
+        &mut logits[..classes],
+        None,
+    )?;
+
+    let mut check = GoldenCheck {
+        max_error: 0.0,
+        same_answer: true,
+    };
+    let (mut best_ours, mut best_theirs) = (0, 0);
+
+    for class in 0..classes {
+        let at = logits_at + 4 + class * 4;
+        let bytes = golden.get(at..at + 4).ok_or(ModelError::Truncated)?;
+        let expected = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+
+        let error = (logits[class] - expected).abs() / (1.0 + expected.abs());
+        check.max_error = check.max_error.max(error);
+
+        if logits[class] > logits[best_ours] {
+            best_ours = class;
+        }
+
+        let best_expected_at = logits_at + 4 + best_theirs * 4;
+        let best_expected = f32::from_le_bytes(
+            golden[best_expected_at..best_expected_at + 4]
+                .try_into()
+                .unwrap(),
+        );
+        if expected > best_expected {
+            best_theirs = class;
+        }
+    }
+
+    check.same_answer = best_ours == best_theirs;
+    Ok(check)
+}
+
 /// Which buffer holds the current activation.
 #[derive(Clone, Copy)]
 enum Source {
@@ -518,12 +701,124 @@ fn check_size(available: usize, needed: usize) -> Result<(), ModelError> {
     }
 }
 
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
+/// Dot product. On the ESP32-S3, when both slices are 16-byte aligned and
+/// a multiple of 4 long, this runs Espressif's vector-load loop (1.5 cycles
+/// per multiply-add, measured); everywhere else, plain Rust.
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let length = a.len().min(b.len());
+
+    #[cfg(target_arch = "xtensa")]
+    {
+        let aligned = (a.as_ptr() as usize | b.as_ptr() as usize) % 16 == 0;
+
+        if aligned && length >= 4 && length % 4 == 0 {
+            // SAFETY: both pointers are 16-byte aligned and valid for
+            // `length` floats, `length` is a multiple of 4.
+            return unsafe { xtensa::dot_vector(a.as_ptr(), b.as_ptr(), length / 4) };
+        }
+    }
+
+    a[..length]
+        .iter()
+        .zip(&b[..length])
+        .map(|(x, y)| x * y)
+        .sum()
+}
+
+/// The ESP32-S3 kernels, written in assembly because the compiler never
+/// produces these instructions itself.
+///
+/// Measured with the firmware's `k` key (cycles per multiply-add): compiled
+/// Rust 9.5, hand-scheduled scalar assembly 3.5, this loop 1.5. The chip's
+/// floating-point unit takes 4 cycles to produce a result but can start one
+/// every cycle, so speed comes from keeping four independent multiply-adds
+/// in flight. Three things the compiler does not do make that possible:
+///
+/// * `madd.s acc, a, b` multiplies and adds in one instruction (the
+///   compiler emits a separate `mul.s` and `add.s`, because fusing them
+///   changes rounding, and Rust does not allow that silently);
+/// * `ee.ldf.128.ip` (an ESP32-S3 extension) loads four floats in one
+///   instruction and advances the pointer;
+/// * `loopnez` is a zero-overhead hardware loop.
+#[cfg(target_arch = "xtensa")]
+mod xtensa {
+    use core::arch::asm;
+
+    /// Sum of `a[i] * b[i]` over `groups * 4` floats: the loop from
+    /// Espressif's `dsps_dotprod_f32_aes3.S`, unchanged.
+    ///
+    /// # Safety
+    /// `a` and `b` must be 16-byte aligned and valid for `groups * 4` floats.
+    #[inline(always)]
+    pub unsafe fn dot_vector(a: *const f32, b: *const f32, groups: usize) -> f32 {
+        let (mut sum0, mut sum1, mut sum2, mut sum3) = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+
+        // SAFETY: the caller guarantees the alignment and length the vector
+        // loads need. The FPU registers used are declared as clobbered.
+        //
+        // `.balign 8; nop; nop.n` puts the 3-byte `loopnez` at 5 mod 8 so the
+        // loop body starts on an 8-byte boundary: the hardware loop requires
+        // an aligned body, and LLVM's assembler, unlike GNU's, does not pad
+        // for it (a misaligned body crashed the board).
+        unsafe {
+            asm!(
+                ".balign 8",
+                "nop",
+                "nop.n",
+                "loopnez {groups}, 1f",
+                "ee.ldf.128.ip f11, f10, f9, f8, {a}, 16",
+                "ee.ldf.128.ip f7, f6, f5, f4, {b}, 16",
+                "madd.s {sum0}, f4, f8",
+                "madd.s {sum1}, f5, f9",
+                "madd.s {sum2}, f6, f10",
+                "madd.s {sum3}, f7, f11",
+                "1:",
+                groups = in(reg) groups,
+                a = inout(reg) a => _,
+                b = inout(reg) b => _,
+                sum0 = inout(freg) sum0,
+                sum1 = inout(freg) sum1,
+                sum2 = inout(freg) sum2,
+                sum3 = inout(freg) sum3,
+                out("f4") _, out("f5") _, out("f6") _, out("f7") _,
+                out("f8") _, out("f9") _, out("f10") _, out("f11") _,
+                options(nostack, readonly, pure)
+            );
+        }
+
+        (sum0 + sum1) + (sum2 + sum3)
+    }
+}
+
+/// The 16-byte aligned part of a scratch buffer (drops up to 3 floats).
+fn aligned_16(buffer: &mut [f32]) -> &mut [f32] {
+    let skip = (((16 - buffer.as_ptr() as usize % 16) % 16) / 4).min(buffer.len());
+    &mut buffer[skip..]
+}
+
+/// How many output steps a convolution gathers at once, and the floats
+/// that takes, for a column of `patch` floats, `length_out` steps and a
+/// budget of `budget` floats.
+fn column_tile(patch: usize, length_out: usize, budget: usize) -> (usize, usize) {
+    let steps = (budget / patch.max(1)).clamp(1, length_out.max(1));
+    (steps, steps * patch)
 }
 
 /// Convolution along time (no padding) followed by ReLU.
 /// `input` is `[channel][time]`; returns the output length.
+///
+/// Written as dot products so the fast `dot` does all the arithmetic:
+///
+/// 1. **Gather.** For a tile of output steps, copy everything each step
+///    sees into one contiguous column: `column[i * kernel + j] =
+///    input[i][t * stride + j * dilation]`. That is exactly the order the
+///    filter weights are stored in (`[output][input][kernel]`).
+/// 2. **Multiply.** Each output value is then `bias + dot(filter, column)`,
+///    a long dot product of two contiguous, 16-byte aligned arrays.
+///
+/// Gathering costs one copy per input value per step, about 1/32 of the
+/// multiply-adds. Doing a whole tile of steps per filter means each filter
+/// is read from flash once per tile, not once per step.
 #[allow(clippy::too_many_arguments)]
 fn conv_relu(
     input: &[f32],
@@ -536,109 +831,50 @@ fn conv_relu(
     stride: usize,
     dilation: usize,
     output: &mut [f32],
+    columns: &mut [f32],
+    column_budget: usize,
 ) -> usize {
     let length_out = (length_in - (dilation * (kernel - 1) + 1)) / stride + 1;
+    let patch = channels_in * kernel;
+    let (tile, _) = column_tile(patch, length_out, column_budget);
 
-    // Loop order matters for speed on the S3. The obvious order (for each
-    // output step, sum over channels and the 5-7 kernel taps) spends more
-    // time on loop setup than on arithmetic, and every addition waits for
-    // the one before it: measured 8 million multiply-adds per second.
-    //
-    // Instead, hold one weight fixed and sweep it across every output step:
-    //     output[o][t] += weight[o][i][j] * input[i][t * stride + j * dilation]
-    // The inner loop is then long (up to 69 steps), walks memory in order,
-    // and its additions are independent of each other. Same result, same
-    // arithmetic, different order.
-    for out_channel in 0..channels_out {
-        let row = &mut output[out_channel * length_out..(out_channel + 1) * length_out];
-        row.fill(bias[out_channel]);
+    let mut first = 0;
 
-        let filter =
-            &weights[out_channel * channels_in * kernel..(out_channel + 1) * channels_in * kernel];
+    while first < length_out {
+        let steps = tile.min(length_out - first);
 
-        for in_channel in 0..channels_in {
-            let signal = &input[in_channel * length_in..(in_channel + 1) * length_in];
-            let taps = &filter[in_channel * kernel..(in_channel + 1) * kernel];
+        // 1. Gather one column per output step in this tile.
+        for step in 0..steps {
+            let start = (first + step) * stride;
+            let column = &mut columns[step * patch..(step + 1) * patch];
 
-            for (tap, &weight) in taps.iter().enumerate() {
-                scaled_add(row, weight, &signal[tap * dilation..], stride);
+            for in_channel in 0..channels_in {
+                let signal = &input[in_channel * length_in..(in_channel + 1) * length_in];
+                let taps = &mut column[in_channel * kernel..(in_channel + 1) * kernel];
+
+                for (tap, value) in taps.iter_mut().enumerate() {
+                    *value = signal[start + tap * dilation];
+                }
             }
         }
 
-        for total in row.iter_mut() {
-            *total = total.max(0.0); // ReLU
+        // 2. Every filter against every column of the tile.
+        for out_channel in 0..channels_out {
+            let filter = &weights[out_channel * patch..(out_channel + 1) * patch];
+            let row = &mut output
+                [out_channel * length_out + first..out_channel * length_out + first + steps];
+
+            for (step, value) in row.iter_mut().enumerate() {
+                let total =
+                    bias[out_channel] + dot(filter, &columns[step * patch..(step + 1) * patch]);
+                *value = total.max(0.0); // ReLU
+            }
         }
+
+        first += steps;
     }
 
     length_out
-}
-
-/// `row[t] += weight * signal[t * stride]` for every `t` in `row`.
-///
-/// Unrolled by hand, four steps at a time, with the four products computed
-/// before any of them is added. The S3 runs instructions strictly in order
-/// and its floating-point unit takes several cycles to finish a multiply or
-/// an add; in a one-at-a-time loop every add waits for its multiply and every
-/// store for its add. With four independent steps in flight those waits
-/// overlap. (The compiler does not unroll this itself because the project's
-/// release build optimizes for size.)
-#[inline(always)]
-fn scaled_add(row: &mut [f32], weight: f32, signal: &[f32], stride: usize) {
-    let steps = row.len();
-
-    if steps == 0 {
-        return;
-    }
-
-    // One up-front check lets the compiler drop the per-element ones.
-    assert!(
-        signal.len() > (steps - 1) * stride,
-        "convolution input too short"
-    );
-
-    if stride == 1 {
-        let mut rows = row.chunks_exact_mut(4);
-        let mut samples = signal[..steps].chunks_exact(4);
-
-        for (total, sample) in (&mut rows).zip(&mut samples) {
-            let products = [
-                weight * sample[0],
-                weight * sample[1],
-                weight * sample[2],
-                weight * sample[3],
-            ];
-            total[0] += products[0];
-            total[1] += products[1];
-            total[2] += products[2];
-            total[3] += products[3];
-        }
-
-        for (total, &sample) in rows.into_remainder().iter_mut().zip(samples.remainder()) {
-            *total += weight * sample;
-        }
-    } else {
-        let mut step = 0;
-
-        while step + 4 <= steps {
-            let base = step * stride;
-            let products = [
-                weight * signal[base],
-                weight * signal[base + stride],
-                weight * signal[base + 2 * stride],
-                weight * signal[base + 3 * stride],
-            ];
-            row[step] += products[0];
-            row[step + 1] += products[1];
-            row[step + 2] += products[2];
-            row[step + 3] += products[3];
-            step += 4;
-        }
-
-        while step < steps {
-            row[step] += weight * signal[step * stride];
-            step += 1;
-        }
-    }
 }
 
 /// Scaled dot-product self-attention over `length` time steps of `dim`
@@ -773,9 +1009,6 @@ mod tests {
     use super::*;
     extern crate std;
 
-    use crate::preprocess::window_input;
-    use legday_core::fused::{FUSED_FRAME_WIRE_BYTES, FusedFrame, FusedWindowBuffer};
-
     #[test]
     fn exp_matches_std() {
         for step in -800..=800 {
@@ -805,63 +1038,34 @@ mod tests {
     #[test]
     fn demo_model_matches_pytorch() {
         let model = Model::parse(&DEMO_MODEL.0).expect("demo model parses");
-        let golden = include_bytes!("../models/demo_golden.bin");
-
-        // Golden file: frame count, frames (120 bytes each), logit count, logits.
-        let frames = u32::from_le_bytes(golden[0..4].try_into().unwrap()) as usize;
-        let mut window = std::boxed::Box::new(FusedWindowBuffer::<225>::new());
-
-        for index in 0..frames {
-            let start = 4 + index * FUSED_FRAME_WIRE_BYTES;
-            let bytes: &[u8; FUSED_FRAME_WIRE_BYTES] = golden
-                [start..start + FUSED_FRAME_WIRE_BYTES]
-                .try_into()
-                .unwrap();
-            window.push(FusedFrame::decode_le(bytes));
-        }
-
-        let offset = 4 + frames * FUSED_FRAME_WIRE_BYTES;
-        let count = u32::from_le_bytes(golden[offset..offset + 4].try_into().unwrap()) as usize;
-        let expected: std::vec::Vec<f32> = (0..count)
-            .map(|index| {
-                let at = offset + 4 + index * 4;
-                f32::from_le_bytes(golden[at..at + 4].try_into().unwrap())
-            })
-            .collect();
-
         let mut input = std::vec![0.0; model.input_floats()];
-        window_input(
-            &window,
-            model.channels,
-            model.steps,
-            model.decimation,
-            model.mean,
-            model.std,
-            &mut input,
-        )
-        .unwrap();
-
         let mut scratch = std::vec![0.0; model.scratch_floats()];
-        let mut logits = std::vec![0.0; model.classes];
-        let mut embedding = std::vec![0.0; model.embedding_size()];
-        model
-            .infer(&input, &mut scratch, &mut logits, Some(&mut embedding))
-            .unwrap();
 
-        for (class, (got, want)) in logits.iter().zip(&expected).enumerate() {
-            assert!(
-                (got - want).abs() <= 1e-3 + 1e-3 * want.abs(),
-                "class {} ({}): rust {got} vs pytorch {want}",
-                class,
-                model.class_name(class)
-            );
-        }
+        let check = check_against_golden(&model, DEMO_GOLDEN, &mut input, &mut scratch).unwrap();
 
-        let best = |values: &[f32]| {
-            (0..values.len())
-                .max_by(|&a, &b| values[a].total_cmp(&values[b]))
-                .unwrap()
-        };
-        assert_eq!(best(&logits), best(&expected));
+        assert!(
+            check.max_error < 1e-3,
+            "max relative error {}",
+            check.max_error
+        );
+        assert!(check.same_answer);
+    }
+
+    #[test]
+    fn small_column_budget_gives_the_same_answer() {
+        let mut model = Model::parse(&DEMO_MODEL.0).unwrap();
+        model.set_column_budget(300); // one column at a time
+        let mut input = std::vec![0.0; model.input_floats()];
+        let mut scratch = std::vec![0.0; model.scratch_floats()];
+        let check = check_against_golden(&model, DEMO_GOLDEN, &mut input, &mut scratch).unwrap();
+        assert!(check.max_error < 1e-3 && check.same_answer);
+    }
+
+    #[test]
+    fn dot_handles_any_length() {
+        let a: std::vec::Vec<f32> = (0..13).map(|i| i as f32).collect();
+        let b = std::vec![2.0_f32; 13];
+        assert_eq!(dot(&a, &b), 156.0);
+        assert_eq!(dot(&a[..0], &b[..0]), 0.0);
     }
 }

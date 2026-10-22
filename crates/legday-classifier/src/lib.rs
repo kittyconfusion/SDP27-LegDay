@@ -1,4 +1,8 @@
 #![no_std]
+// The ESP32-S3 kernels in `cnn` use inline assembly, which is still a
+// nightly-only feature on Xtensa (the esp toolchain is nightly). Other
+// targets, including the Mac running `cargo test`, do not need it.
+#![cfg_attr(target_arch = "xtensa", feature(asm_experimental_arch))]
 
 //! Hardware-independent preprocessing and inference for the LegDay motion
 //! classifier, plus the orientation math the firmware shares with it.

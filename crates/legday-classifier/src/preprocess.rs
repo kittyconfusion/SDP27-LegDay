@@ -120,6 +120,32 @@ pub fn window_input<const N: usize>(
     std: &[f32],
     out: &mut [f32],
 ) -> Result<(), InputError> {
+    frames_input(
+        |index| window.get(index).copied(),
+        window.len(),
+        model_channels,
+        steps,
+        decimation,
+        mean,
+        std,
+        out,
+    )
+}
+
+/// The same as [`window_input`], for frames that are not in a
+/// `FusedWindowBuffer`: `frame_at(i)` returns frame `i` of `available`,
+/// oldest first. Used to replay a recorded window without copying it.
+#[allow(clippy::too_many_arguments)]
+pub fn frames_input(
+    frame_at: impl Fn(usize) -> Option<FusedFrame>,
+    available: usize,
+    model_channels: usize,
+    steps: usize,
+    decimation: usize,
+    mean: &[f32],
+    std: &[f32],
+    out: &mut [f32],
+) -> Result<(), InputError> {
     if model_channels != CHANNELS || mean.len() != CHANNELS || std.len() != CHANNELS {
         return Err(InputError::ChannelMismatch {
             model: model_channels,
@@ -129,11 +155,8 @@ pub fn window_input<const N: usize>(
 
     let needed = steps * decimation;
 
-    if window.len() < needed {
-        return Err(InputError::NotEnoughFrames {
-            needed,
-            available: window.len(),
-        });
+    if available < needed {
+        return Err(InputError::NotEnoughFrames { needed, available });
     }
 
     if out.len() != CHANNELS * steps {
@@ -143,16 +166,19 @@ pub fn window_input<const N: usize>(
         });
     }
 
-    let first = window.len() - needed;
+    let first = available - needed;
     let mut channels = [0.0_f32; CHANNELS];
 
     for step in 0..steps {
         let mut sum = [0.0_f32; CHANNELS];
 
         for offset in 0..decimation {
-            // `first + ...` is always < window.len(), checked above.
-            let frame = window.get(first + step * decimation + offset).unwrap();
-            frame_channels(frame, &mut channels);
+            let index = first + step * decimation + offset;
+            let frame = frame_at(index).ok_or(InputError::NotEnoughFrames {
+                needed,
+                available: index,
+            })?;
+            frame_channels(&frame, &mut channels);
 
             for (total, value) in sum.iter_mut().zip(&channels) {
                 *total += *value;

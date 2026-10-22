@@ -295,49 +295,56 @@ def count_macs(model) -> int:
 
 
 def export_model(path: Path, model, mean: np.ndarray, std: np.ndarray, class_names: list[str]) -> None:
-    """Write the model as a .ldm file.
+    """Write the model as a .ldm file (format version 2).
 
-    Layout (all little-endian; every field a multiple of 4 bytes so the S3
-    can read the weights in place from flash):
+    Layout, all little-endian:
 
         "LDM1", version, channels, steps, decimation, classes, layer count  (u32)
         class names: 8 ASCII bytes each
         input mean[channels], input std[channels]                           (f32)
         per layer: kind, 5 parameters (u32), then its weights and biases    (f32)
-    """
-    layers = []
 
-    def tensor(t) -> bytes:
-        return t.detach().cpu().numpy().astype("<f4").tobytes()
+    Every float array starts on a 16-byte boundary (zero padding before it),
+    so the S3 can read the weights in place from flash and load them four at
+    a time with its 128-bit vector load. cnn.rs skips the same padding.
+    """
+    out = bytearray()
+
+    def floats(values) -> None:
+        out.extend(b"\0" * ((16 - len(out) % 16) % 16))
+        out.extend(np.asarray(values, dtype="<f4").tobytes())
+
+    def tensor(t) -> np.ndarray:
+        return t.detach().cpu().numpy()
+
+    layer_count = len(model.convs) + (1 if model.attention is not None else 0) + 2
+    out.extend(struct.pack("<4s6I", b"LDM1", 2, CHANNELS, STEPS, DECIMATION, len(class_names), layer_count))
+    out.extend(b"".join(name.encode("ascii")[:8].ljust(8, b"\0") for name in class_names))
+    floats(mean)
+    floats(std)
 
     for conv in model.convs:
-        header = struct.pack(
+        out.extend(struct.pack(
             "<6I", LAYER_CONV_RELU, conv.in_channels, conv.out_channels,
             conv.kernel_size[0], conv.stride[0], conv.dilation[0],
-        )
-        layers.append(header + tensor(conv.weight) + tensor(conv.bias))
+        ))
+        floats(tensor(conv.weight))
+        floats(tensor(conv.bias))
 
     if model.attention is not None:
         dim = model.convs[-1].out_channels
-        body = b"".join(
-            tensor(linear.weight) + tensor(linear.bias)
-            for linear in (model.attention.query, model.attention.key, model.attention.value, model.attention.output)
-        )
-        layers.append(struct.pack("<6I", LAYER_SELF_ATTENTION, dim, 0, 0, 0, 0) + body)
+        out.extend(struct.pack("<6I", LAYER_SELF_ATTENTION, dim, 0, 0, 0, 0))
+        for linear in (model.attention.query, model.attention.key, model.attention.value, model.attention.output):
+            floats(tensor(linear.weight))
+            floats(tensor(linear.bias))
 
-    layers.append(struct.pack("<6I", LAYER_GLOBAL_AVG_POOL, 0, 0, 0, 0, 0))
-    layers.append(
-        struct.pack("<6I", LAYER_DENSE, model.head.in_features, model.head.out_features, 0, 0, 0)
-        + tensor(model.head.weight) + tensor(model.head.bias)
-    )
-
-    names = b"".join(name.encode("ascii")[:8].ljust(8, b"\0") for name in class_names)
-    header = struct.pack("<4s6I", b"LDM1", 1, CHANNELS, STEPS, DECIMATION, len(class_names), len(layers))
+    out.extend(struct.pack("<6I", LAYER_GLOBAL_AVG_POOL, 0, 0, 0, 0, 0))
+    out.extend(struct.pack("<6I", LAYER_DENSE, model.head.in_features, model.head.out_features, 0, 0, 0))
+    floats(tensor(model.head.weight))
+    floats(tensor(model.head.bias))
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(
-        header + names + mean.astype("<f4").tobytes() + std.astype("<f4").tobytes() + b"".join(layers)
-    )
+    path.write_bytes(bytes(out))
 
 
 def export_golden(path: Path, frames: np.ndarray, logits: np.ndarray) -> None:

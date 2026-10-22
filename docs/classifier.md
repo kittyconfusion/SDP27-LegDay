@@ -145,47 +145,92 @@ channels decide accuracy far more than size.
 
 ## Measured on the S3 (October 22, 2026)
 
-| Model | Parameters | Multiply-adds | Flash | Time per inference |
-| --- | --- | --- | --- | --- |
-| tiny (width 16) | 11,686 | 0.47 M | 46 kB | 30 ms |
-| small (width 32, the demo) | 37,190 | 1.26 M | 145 kB | 95 ms |
-| small + attention | 53,830 | 1.51 M | 210 kB | 119 ms |
-| medium (width 80) | 196,646 | 5.5 M | 768 kB | 472 ms |
-| large (width 190) | 1,031,326 | 26.2 M | 4,029 kB | 2,391 ms |
+The first version of the inference engine ran at 13 million multiply-adds
+per second: 95 ms for the demo model. A day of measurement traced that to
+two causes, fixed both, and brought the demo model to **13 ms**.
 
-Preprocessing the window adds 3.6 ms. Measure again with the `b` key; the
-size sweep needs a build with `--features model-bench` after
-`python3 Scripts/train_classifier.py bench-models`.
+### Why plain code was slow
 
-The engine runs at 11-16 million multiply-adds per second. The cause was
-measured directly: the compiler's code makes this in-order CPU stall about
-9 cycles on every multiply-add, whichever way the loop is written (even
-plain arrays in internal RAM, and even the chip's fused multiply-add
-instruction). Espressif's hand-written assembly reaches about one cycle per
-multiply-add on the same chip, so roughly 10x is available.
+Measured in CPU cycles with hand-written assembly (`k` key,
+`crates/main_app/bin/imu_cycles.rs`):
 
-What that means today:
+| Measurement | Cycles |
+| --- | --- |
+| hardware loop overhead | 1.0 per iteration |
+| `add.s` / `madd.s` result available after | 4.0 |
+| four independent `madd.s` | 4.0 for all four (one per cycle) |
+| dot product, compiled Rust | 9.5 per multiply-add |
+| dot product, assembly, ordinary loads | 3.5 per multiply-add |
+| dot product, Espressif's ESP-DSP loop | 1.5 per multiply-add |
 
-- The 37k-parameter model classifies about 10 times per second. That is
-  already in the normal range for activity recognition (mode changes take a
-  few hundred milliseconds), but not the 25 ms cadence originally planned.
-- A 1M-parameter model takes 2.4 s per inference and is not practical in
-  real time on this chip, independent of the overfitting concern.
-- The firmware caps the classifier at half the CPU, so a slow model can
-  never starve sensing: 228 frames per second with no losses while
-  classifying and recording.
+The floating-point unit takes 4 cycles to produce a result but can start a
+new one every cycle, so fast code keeps four independent multiply-adds in
+flight. Espressif's loop does that with three things compilers do not emit:
+the fused `madd.s`, the ESP32-S3's `ee.ldf.128.ip` (four floats per load),
+and the zero-overhead `loopnez` hardware loop. LLVM (Rust's compiler)
+instead emits `mul.s` then `add.s` and stalls on each. Espressif's own plain
+C does no better at `-Os`: their published benchmark (`esp_bm_results.csv`)
+shows 14 cycles per multiply-add for C at `-Os`, 5 at `-O2`, 1.5 for their
+assembly. Building our firmware at `opt-level = 3` changed nothing.
 
-Ways to get the 25 ms cadence, roughly in order of effort:
+**Fix:** `cnn::dot` runs Espressif's loop, unchanged, through Rust inline
+assembly on the S3, and plain Rust elsewhere. Convolutions are rewritten as
+dot products: gather each output step's inputs into a contiguous column,
+then `bias + dot(filter, column)`. Model files pad every weight array to 16
+bytes so the vector loads can read them in place.
 
-1. **Run it on the other core.** Sensing and control stay on one core; the
-   classifier gets a whole core instead of half of one.
-2. **A cheaper architecture.** Depthwise-separable convolutions (the
-   MobileNet idea) cut multiply-adds 4-8x for similar accuracy; a lower input
-   rate (37.5 Hz) halves them again.
-3. **int8 weights with Espressif's ESP-NN or ESP-DL kernels.** These are the
-   hand-optimized routines that use the S3's vector instructions, typically
-   10x or more faster than plain float code. They are C libraries, so this
-   means a C call from Rust, which the project already allows for.
+One trap found on the way: the hardware loop needs its body aligned in
+memory. GNU's assembler pads for that automatically; LLVM's does not, and a
+misaligned loop crashed the board. The kernel pads explicitly.
+
+### Why the weights were slow
+
+| `cnn::dot`, one operand in flash | Cycles per multiply-add |
+| --- | --- |
+| data already in cache | 1.57 |
+| data not in cache, flash at espflash's default DIO 40 MHz | 118.6 |
+| data not in cache, flash at DIO 80 MHz | 62.1 |
+| both operands in internal RAM | 1.58 |
+
+Reading from flash is fine while cached and very slow on a miss.
+
+**Fixes:** `crates/scripts/firmware.sh` now flashes at DIO 80 MHz (twice the
+bandwidth for every cache miss, code included). QIO would be faster again,
+but the bootloader espflash bundles does not set the flash's quad-enable bit
+and the board boot-loops; reflashing in DIO recovers it. The firmware also
+copies the demo model's weights (149 kB) into internal RAM at start-up,
+leaving about 51 kB for the stack.
+
+### Results
+
+| Model | Parameters | Weights | First version | Vector kernel | + 80 MHz flash | + weights in RAM |
+| --- | --- | --- | --- | --- | --- | --- |
+| tiny | 11,686 | 46 kB | 30 ms | 6.3 ms | 6.3 ms | |
+| **small (demo)** | **37,190** | **145 kB** | **95 ms** | **31 ms** | **22 ms** | **13 ms** |
+| small + attention | 53,830 | 210 kB | 119 ms | 56 ms | 43 ms | |
+| medium | 196,646 | 768 kB | 472 ms | 153 ms | 101 ms | |
+| large | 1,031,326 | 4,029 kB | 2,391 ms | 1,728 ms | 1,339 ms | |
+
+Every step is checked: at start-up the board replays a window exported by
+the training script and compares with PyTorch (maximum error 7e-7), and
+`cargo test` does the same on the Mac.
+
+Preprocessing the window adds 3.5 ms. The firmware still caps the
+classifier at half the CPU, so it can never starve sensing; at 13 ms it runs
+28 times per second alongside 228 Hz sensing and SD recording.
+
+### What is left
+
+- **Models too big for RAM** (medium and up) are limited by flash. The 8 MB
+  PSRAM, once enabled, is a faster home for them than flash; int8 weights
+  would cut the bytes four times.
+- **Attention** still uses plain loops (about 10 cycles per multiply-add);
+  it can be rewritten on `dot` the same way.
+- **int8 with the S3's integer vector instructions** (ESP-NN / ESP-DL)
+  is the next large step: Espressif's benchmark shows an int8 dot product at
+  about 0.4 cycles per multiply-add, four times the float kernel.
+- **The second core**: the classifier belongs there, away from sensing and
+  control.
 
 ## On-device training
 

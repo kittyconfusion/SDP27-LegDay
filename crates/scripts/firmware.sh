@@ -68,7 +68,14 @@ case "$action" in
         if [[ "$action" == sd ]]; then binary=sd-card-test; fi
         if [[ "$action" == imu ]]; then binary=imu-sensor-test; fi
         cargo build --locked --release --bin "$binary"
-        exec espflash flash --chip esp32s3 --flash-size 16mb --monitor \
+        # DIO at 80 MHz doubles flash bandwidth over espflash's default (40 MHz):
+        # every instruction- or data-cache miss is served twice as fast, which
+        # took the classifier from 31 ms to 22 ms with weights in flash. QIO is
+        # faster still but needs the flash's quad-enable bit, which espflash's
+        # bundled bootloader does not set (the board boot-loops; reflash in DIO
+        # to recover). Measured October 22, 2026; see docs/classifier.md.
+        exec espflash flash --chip esp32s3 --flash-size 16mb \
+            --flash-mode dio --flash-freq 80mhz --monitor \
             "$@" "$workspace_dir/target/xtensa-esp32s3-none-elf/release/$binary"
         ;;
     monitor)

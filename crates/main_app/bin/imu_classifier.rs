@@ -18,9 +18,12 @@
 use esp_println::println;
 
 use legday_classifier::{
-    cnn::{DEMO_MODEL, Model, ModelError, softmax},
+    cnn::{DEMO_GOLDEN, DEMO_MODEL, Model, ModelError, check_against_golden, softmax},
     preprocess::window_input,
 };
+
+#[cfg(not(feature = "model-bench"))]
+use legday_classifier::cnn::{Aligned, DEMO_MODEL_BYTES};
 
 use legday_core::fused::FusedWindowBuffer;
 use static_cell::ConstStaticCell;
@@ -35,12 +38,32 @@ const CLASSIFY_EVERY_FRAMES: u32 = 6;
 /// Model input: 40 channels x 75 steps.
 const INPUT_FLOATS: usize = 40 * 75;
 
-/// Activation scratch. The default build only needs room for the demo
-/// model; the benchmark build needs room for the ~1M-parameter model.
+/// Copy the model's weights from flash into internal RAM at start-up.
+/// Reading weights from flash costs a cache miss every 32 bytes (62 cycles
+/// per multiply-add at 80 MHz DIO, measured), so with the weights in RAM the
+/// CNN runs at the speed of its arithmetic. Costs 149 kB of RAM for the demo
+/// model; the benchmark build keeps them in flash to leave room for its
+/// large scratch buffer.
 #[cfg(not(feature = "model-bench"))]
-const SCRATCH_FLOATS: usize = 8_192;
+const WEIGHTS_IN_RAM: bool = true;
+
+/// Column budget once weights are in RAM: re-reading weights is then cheap,
+/// so a smaller tile (32 kB) saves RAM for nothing.
+#[cfg(not(feature = "model-bench"))]
+const RAM_COLUMN_BUDGET_FLOATS: usize = 8_192;
+
+/// Scratch for activations plus the convolution's gathered input columns.
+/// Default build: the demo model at the RAM column budget (12,611 floats).
+/// Benchmark build: the ~1M-parameter model at the default budget (42,463).
+#[cfg(not(feature = "model-bench"))]
+const SCRATCH_FLOATS: usize = 12_672;
 #[cfg(feature = "model-bench")]
-const SCRATCH_FLOATS: usize = 26_624;
+const SCRATCH_FLOATS: usize = 42_496;
+
+/// RAM copy of the demo model (only allocated when `WEIGHTS_IN_RAM`).
+#[cfg(not(feature = "model-bench"))]
+static MODEL_IN_RAM: ConstStaticCell<Aligned<[u8; DEMO_MODEL_BYTES]>> =
+    ConstStaticCell::new(Aligned([0; DEMO_MODEL_BYTES]));
 
 /// Most classes a model may have (the logits buffer).
 const MAX_CLASSES: usize = 16;
@@ -83,7 +106,7 @@ pub struct LiveClassifier {
 impl LiveClassifier {
     /// Parses the demo model and checks it fits the static buffers.
     pub fn new() -> Result<Self, ModelError> {
-        let model = Model::parse(&DEMO_MODEL.0)?;
+        let model = Self::load_model()?;
 
         if model.input_floats() != INPUT_FLOATS || model.classes > MAX_CLASSES {
             return Err(ModelError::BufferSize {
@@ -107,15 +130,56 @@ impl LiveClassifier {
             CLASSIFY_EVERY_FRAMES
         );
 
+        let input = INPUT.take();
+        let scratch = SCRATCH.take();
+
+        // Self-test: replay the window the training script exported and
+        // compare with PyTorch's answer. This checks the whole on-board path,
+        // including the ESP32-S3 assembly kernels, against the Mac.
+        let started = now_us();
+        match check_against_golden(&model, DEMO_GOLDEN, &mut input[..], &mut scratch[..]) {
+            Ok(check) => println!(
+                "Classifier self-test vs PyTorch: max error {:.2e}, same answer: {} ({} ms) -> {}",
+                check.max_error,
+                check.same_answer,
+                (now_us() - started) / 1_000,
+                if check.max_error < 1e-3 && check.same_answer {
+                    "PASS"
+                } else {
+                    "FAIL"
+                }
+            ),
+            Err(error) => println!("Classifier self-test could not run: {:?}", error),
+        }
+
         Ok(Self {
             model,
-            input: INPUT.take(),
-            scratch: SCRATCH.take(),
+            input,
+            scratch,
             frames_since_run: 0,
             next_allowed_us: 0,
             last: None,
             timing: ClassifierTiming::default(),
         })
+    }
+
+    /// Parses the demo model, from a RAM copy if `WEIGHTS_IN_RAM`.
+    fn load_model() -> Result<Model<'static>, ModelError> {
+        #[cfg(not(feature = "model-bench"))]
+        if WEIGHTS_IN_RAM {
+            let copy = MODEL_IN_RAM.take();
+            copy.0.copy_from_slice(&DEMO_MODEL.0);
+
+            let mut model = Model::parse(&copy.0)?;
+            model.set_column_budget(RAM_COLUMN_BUDGET_FLOATS);
+            println!(
+                "Classifier: weights copied to internal RAM ({} bytes)",
+                DEMO_MODEL_BYTES
+            );
+            return Ok(model);
+        }
+
+        Model::parse(&DEMO_MODEL.0)
     }
 
     /// Call after each assembly stage with the number of new frames. Runs at
