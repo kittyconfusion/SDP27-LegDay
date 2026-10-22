@@ -10,12 +10,16 @@ use crate::{FRAME_WIRE_BYTES, IMU_COUNT, SensorFrame, recording::FRAMES_PER_SD_B
 
 /// Three signed Q30 vector components per IMU; `w` is reconstructed.
 pub const QUAT6_BYTES_PER_IMU: usize = 12;
+
 /// Stable encoded size of one fused frame: 72 raw bytes + 4 x 12 quaternion bytes.
 pub const FUSED_FRAME_WIRE_BYTES: usize = FRAME_WIRE_BYTES + IMU_COUNT * QUAT6_BYTES_PER_IMU;
+
 /// Byte range of the raw [`SensorFrame`] inside an encoded fused frame.
 pub const RAW_FRAME_RANGE: core::ops::Range<usize> = 0..FRAME_WIRE_BYTES;
+
 /// Byte range of the four Quat6 vectors inside an encoded fused frame.
 pub const QUAT6_RANGE: core::ops::Range<usize> = FRAME_WIRE_BYTES..FUSED_FRAME_WIRE_BYTES;
+
 /// Encoded size of one SD-card batch of fused frames.
 pub const FUSED_SD_BATCH_BYTES: usize = FRAMES_PER_SD_BATCH * FUSED_FRAME_WIRE_BYTES;
 
@@ -24,16 +28,22 @@ pub const FUSED_SD_BATCH_BYTES: usize = FRAMES_PER_SD_BATCH * FUSED_FRAME_WIRE_B
 pub mod status {
     pub const ORIENTATION_SOURCE_MASK: u16 = 0x0003;
     pub const ORIENTATION_NONE: u16 = 0x0000;
+
     /// Quaternion came from the ICM-20948 DMP (on the breakout board).
     pub const ORIENTATION_DMP: u16 = 0x0001;
+
     /// Quaternion came from the software filter running on the ESP32-S3.
     pub const ORIENTATION_SOFTWARE: u16 = 0x0002;
+
     /// The IMU FIFO overflowed or was resynchronised shortly before this frame.
     pub const FIFO_OVERFLOW: u16 = 0x0004;
+
     /// The timestamp was reconstructed from the FIFO drain time and the ODR.
     pub const TIMESTAMP_RECONSTRUCTED: u16 = 0x0008;
+
     /// DMP accelerometer calibration accuracy (0-3) occupies bits 4-5.
     pub const ACCEL_ACCURACY_SHIFT: u16 = 4;
+
     /// Gyroscope calibration level (0-3) occupies bits 6-7: the DMP's own
     /// accuracy in DMP mode, or the S3's `GyroBias` level in software mode.
     pub const GYRO_ACCURACY_SHIFT: u16 = 6;
@@ -42,10 +52,12 @@ pub mod status {
     /// Accelerometer full-scale setting (0 = ±2 g, 1 = ±4 g, 2 = ±8 g,
     /// 3 = ±16 g) occupies bits 8-9. Only meaningful if `RANGES_RECORDED`.
     pub const ACCEL_RANGE_SHIFT: u16 = 8;
+
     /// Gyroscope full-scale setting (0 = ±250, 1 = ±500, 2 = ±1000,
     /// 3 = ±2000 dps) occupies bits 10-11. Only meaningful if `RANGES_RECORDED`.
     pub const GYRO_RANGE_SHIFT: u16 = 10;
     pub const RANGE_MASK: u16 = 0x0003;
+
     /// Bits 8-11 hold the sensor ranges. Files recorded before this bit
     /// existed were all ±4 g and ±2000 dps.
     pub const RANGES_RECORDED: u16 = 0x1000;
@@ -88,8 +100,11 @@ impl FusedFrame {
     /// Encodes the raw frame in bytes `0..72` followed by the quaternions.
     pub fn encode_le(&self) -> [u8; FUSED_FRAME_WIRE_BYTES] {
         let mut bytes = [0_u8; FUSED_FRAME_WIRE_BYTES];
+
         bytes[RAW_FRAME_RANGE].copy_from_slice(&self.raw.encode_le());
+
         let mut offset = FRAME_WIRE_BYTES;
+
         for quat in &self.quat6 {
             for value in [quat.x, quat.y, quat.z] {
                 bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -105,13 +120,17 @@ impl FusedFrame {
             raw: SensorFrame::decode_le(raw_bytes),
             quat6: [Quat6Raw::ZERO; IMU_COUNT],
         };
+
         let mut offset = FRAME_WIRE_BYTES;
+
         for quat in &mut frame.quat6 {
             let mut values = [0_i32; 3];
+
             for value in &mut values {
                 *value = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
                 offset += 4;
             }
+
             *quat = Quat6Raw {
                 x: values[0],
                 y: values[1],
@@ -177,6 +196,7 @@ impl<const N: usize> FusedWindowBuffer<N> {
         if chronological_index >= self.len {
             return None;
         }
+
         let oldest = if self.len == N { self.next } else { 0 };
         Some(&self.frames[(oldest + chronological_index) % N])
     }
@@ -223,6 +243,7 @@ impl FusedFrameBatch {
     /// Appends one frame; returns `true` once the batch is full.
     pub fn push(&mut self, frame: &FusedFrame) -> bool {
         assert!(!self.is_full(), "clear a full batch before pushing");
+
         let start = self.frames * FUSED_FRAME_WIRE_BYTES;
         self.bytes[start..start + FUSED_FRAME_WIRE_BYTES].copy_from_slice(&frame.encode_le());
         self.frames += 1;
@@ -266,6 +287,7 @@ mod tests {
 
     fn frame(sequence: u32) -> FusedFrame {
         let mut frame = FusedFrame::ZERO;
+
         frame.raw.sequence = sequence;
         frame.raw.timestamp_us = u64::from(sequence) * 4_444;
         frame.raw.valid_imu_mask = 0b0001;
@@ -286,6 +308,7 @@ mod tests {
     fn fused_encoding_is_120_bytes_and_round_trips() {
         let original = frame(9);
         let encoded = original.encode_le();
+
         assert_eq!(encoded.len(), 120);
         assert_eq!(FusedFrame::decode_le(&encoded), original);
     }
@@ -294,6 +317,7 @@ mod tests {
     fn raw_prefix_matches_plain_sensor_frame_encoding() {
         let original = frame(3);
         let encoded = original.encode_le();
+
         assert_eq!(FusedFrame::raw_bytes(&encoded), &original.raw.encode_le());
         assert_eq!(
             SensorFrame::decode_le(FusedFrame::raw_bytes(&encoded)),
@@ -305,10 +329,13 @@ mod tests {
     #[test]
     fn window_exposes_raw_frames_in_order() {
         let mut window = FusedWindowBuffer::<3>::new();
+
         for sequence in 0..5 {
             window.push(frame(sequence));
         }
+
         let sequences: Vec<u32> = window.raw_frames().map(|raw| raw.sequence).collect();
+
         assert_eq!(sequences, vec![2, 3, 4]);
 
         let mut plain = crate::WindowBuffer::<3>::new();
@@ -319,6 +346,7 @@ mod tests {
     #[test]
     fn batch_concatenates_fused_frames() {
         let mut batch = FusedFrameBatch::new();
+
         assert!(!batch.push(&frame(1)));
         assert!(!batch.push(&frame(2)));
         assert_eq!(batch.encoded().len(), 2 * FUSED_FRAME_WIRE_BYTES);

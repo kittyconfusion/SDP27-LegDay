@@ -99,6 +99,7 @@ impl SampleClock {
         // The period is measured against the anchor *before* this burst is
         // counted, so the division never sees zero samples.
         let period_scaled = self.period_scaled(drain_us);
+
         if self.anchor.is_none() {
             self.anchor = Some((drain_us, self.samples));
         }
@@ -146,6 +147,7 @@ mod tests {
 
         let mut sample = 0_u64;
         let mut pseudo_random = 12_345_u64;
+
         while sample < 20_000 {
             // Burst of 1..=8 samples, drained 500..=8000 µs after the newest.
             pseudo_random = pseudo_random
@@ -159,6 +161,7 @@ mod tests {
             for offset in 0..count as u64 {
                 truth.push((sample + offset) * TRUE_PERIOD_US + 1_000_000);
             }
+
             clock.burst(drain_us, count, |timestamp| estimates.push(timestamp));
             sample += count as u64;
         }
@@ -175,8 +178,10 @@ mod tests {
             .zip(settled_truth)
             .map(|(estimate, actual)| *estimate as i64 - *actual as i64)
             .collect();
+
         let min_offset = *offsets.iter().min().unwrap();
         let max_offset = *offsets.iter().max().unwrap();
+
         assert!(
             max_offset - min_offset < 1_500,
             "offset spread {} µs (min {min_offset}, max {max_offset})",
@@ -185,6 +190,7 @@ mod tests {
 
         // The measured period converges on the true one.
         let period = clock.period_us(truth[truth.len() - 1] + 2_000);
+
         assert!(
             (period as i64 - TRUE_PERIOD_US as i64).abs() <= 2,
             "period {period}"
@@ -197,15 +203,19 @@ mod tests {
         const TRUE_PERIOD_US: u64 = 4_375;
         let mut clock = SampleClock::new(4_444);
         let mut last = 0;
+
         // Two seconds of normal operation, one sample per drain.
         for sample in 0..600_u64 {
             clock.burst(sample * TRUE_PERIOD_US + 700, 1, |timestamp| {
                 last = timestamp
             });
         }
+
         // Two seconds of silence in which ~460 samples were lost.
         clock.resync();
+
         let resume_us = 1_060 * TRUE_PERIOD_US + 700;
+
         for sample in 0..1_000_u64 {
             let drain_us = resume_us + sample * TRUE_PERIOD_US;
             clock.burst(drain_us, 1, |timestamp| {
@@ -213,7 +223,9 @@ mod tests {
                 last = timestamp;
             });
         }
+
         let period = clock.period_us(resume_us + 1_000 * TRUE_PERIOD_US);
+
         assert!(
             (period as i64 - TRUE_PERIOD_US as i64).abs() <= 2,
             "period {period}"
