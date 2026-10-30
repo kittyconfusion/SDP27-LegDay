@@ -34,6 +34,9 @@ esp32c6 = [
     "esp-println/esp32c6",
     "esp-radio/esp32c6",
 ]
+# psram stuff requires release optimizations (but want the possibility of debug for the rest of the build)
+[profile.dev.package.esp-hal]
+opt-level = 3
 
 [dependencies]
 legday-core = { path = "../legday-core" }

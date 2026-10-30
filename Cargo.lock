@@ -1848,6 +1848,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "quadriceps"
+version = "0.1.0"
+dependencies = [
+ "bt-hci",
+ "critical-section",
+ "embassy-executor",
+ "embassy-net",
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "embedded-hal-bus",
+ "embedded-io 0.7.1",
+ "embedded-io-async 0.7.0",
+ "embedded-sdmmc",
+ "esp-alloc",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-println",
+ "esp-radio",
+ "esp-rtos",
+ "heapless 0.9.3",
+ "legday-core",
+ "log",
+ "ringbuffer",
+ "smoltcp 0.14.0",
+ "static_cell",
+ "trouble-host",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1890,6 +1920,12 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "ringbuffer"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57b0b88a509053cbfd535726dcaaceee631313cef981266119527a1d110f6d2b"
 
 [[package]]
 name = "riscv"
