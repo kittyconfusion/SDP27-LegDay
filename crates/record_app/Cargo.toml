@@ -37,6 +37,7 @@ opt-level = 3
 legday-core = { path = "../legday-core" }
 
 ringbuffer = "0.16.0"
+
 esp-backtrace = { version = "0.20", features = ["panic-handler", "println"] }
 esp-hal = { version = "~1.2.2", features = ["log-04", "unstable"] }
 esp-rtos = { version = "0.4.0", features = [
@@ -56,7 +57,7 @@ embassy-net = { version = "0.9.1", features = [
     "udp",
 ] }
 embedded-hal = "1.0.0"
-embedded-hal-bus = "0.3.0"
+embedded-hal-bus = {version = "0.3.0", features = ["async"]}
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
 embedded-sdmmc = "0.10.0"
