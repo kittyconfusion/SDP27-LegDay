@@ -1536,6 +1536,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e712f64ec3850b98572bffac52e2c6f282b29fe6c5fa6d42334b30be438d95c1"
 
 [[package]]
+name = "ht16k33-async"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07b9f803c8bb0efdb8f4cddf78ba782498cb71a2b7df9c3f399a11f7aeee0ed7"
+dependencies = [
+ "embedded-hal-async",
+]
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1864,9 +1873,10 @@ name = "quadriceps"
 version = "0.1.0"
 dependencies = [
  "bt-hci",
- "critical-section",
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-net",
+ "embassy-sync 0.8.0",
  "embassy-time",
  "embedded-hal 1.0.0",
  "embedded-hal-bus",
@@ -1881,6 +1891,7 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "heapless 0.9.3",
+ "ht16k33-async",
  "legday-core",
  "log",
  "ringbuffer",

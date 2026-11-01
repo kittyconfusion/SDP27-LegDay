@@ -23,22 +23,22 @@ use esp_hal::{
     clock::CpuClock,
     delay::Delay,
     gpio::{Input, Level, Output, OutputConfig},
-    interrupt::Priority,
-    spi::{
-        Mode,
-        master::{Config, Spi},
-    },
+    i2c,
+    i2c::master::I2c,
+    spi,
+    spi::master::Spi,
     system::Stack,
     time::Rate,
 };
 use esp_rtos::embassy::{Executor, InterruptExecutor};
 
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
+
 use static_cell::{ConstStaticCell, StaticCell};
 
-use critical_section::{Mutex, with};
 use esp_hal::timer::timg::{self, TimerGroup};
-use esp_println::println;
-use log::{self, Record, error};
+use log::{self, error};
 use ringbuffer::{ConstGenericRingBuffer, RingBuffer};
 
 // Alternative to providing our own panic_handler
@@ -48,13 +48,21 @@ use esp_backtrace as _;
 extern crate alloc;
 use alloc::format;
 
-static RING: Mutex<RefCell<ConstGenericRingBuffer<[u8; BUFFER_SIZE], NUM_BUFFERS>>> =
-    Mutex::new(RefCell::new(ConstGenericRingBuffer::<
-        [u8; BUFFER_SIZE],
-        NUM_BUFFERS,
-    >::new()));
+use crate::bin::imu_controller::I2cController;
 
-static CORE1_STACK: ConstStaticCell<Stack<8192>> = ConstStaticCell::new(Stack::new());
+static RING: Mutex<
+    CriticalSectionRawMutex,
+    ConstGenericRingBuffer<[u8; BUFFER_SIZE], NUM_BUFFERS>,
+> = Mutex::new(ConstGenericRingBuffer::<[u8; BUFFER_SIZE], NUM_BUFFERS>::new());
+
+// NOTE: Be careful about passing this BETWEEN cores because can end up in spinloop, just take care
+// For other things may want to use critical_section mutex but that is caveated
+static I2C0_BUS: StaticCell<Mutex<CriticalSectionRawMutex, I2c<'static, Async>>> =
+    StaticCell::new();
+static I2C1_BUS: StaticCell<Mutex<CriticalSectionRawMutex, I2c<'static, Async>>> =
+    StaticCell::new();
+
+static CORE1_STACK: StaticCell<Stack<8192>> = StaticCell::new();
 
 // Creates a default app-descriptor required by the esp-idf bootloader. aka makes things work right.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -81,41 +89,71 @@ async fn main(spawner: Spawner) -> ! {
     let sclk = peripherals.GPIO0;
     let miso = peripherals.GPIO2;
     let mosi = peripherals.GPIO11;
-    let cs = peripherals.GPIO5;
+    let cs = peripherals.GPIO12;
 
-    let mut spi = Spi::new(
-        peripherals.SPI2,
-        Config::default()
-            .with_frequency(Rate::from_khz(400))
-            .with_mode(Mode::_0),
-    )
-    .unwrap()
-    .with_sck(sclk)
-    .with_miso(miso)
-    .with_mosi(mosi)
-    .into_async();
+    let sda0 = peripherals.GPIO4;
+    let scl0 = peripherals.GPIO5;
+    let sda1 = peripherals.GPIO6;
+    let scl1 = peripherals.GPIO7;
 
-    spawner.spawn(
-        sensor_writer(
-            spi,
-            Output::new(cs, Level::High, OutputConfig::default()),
-            delay,
-        )
-        .unwrap(),
-    );
+    // let's spawn some tasks!
+    // problematic blocking code for sd writing runs on core0
+    // gpio control and the key sensor read task run on core1
+
     esp_rtos::start_second_core(
         peripherals.CPU_CTRL,
         peripherals.FROM_CPU_INTR1,
-        CORE1_STACK.take(),
-        || {
+        CORE1_STACK.init(Stack::new()),
+        move || {
+            let spi = Spi::new(
+                peripherals.SPI2,
+                spi::master::Config::default()
+                    .with_frequency(Rate::from_khz(400))
+                    .with_mode(spi::Mode::_0),
+            )
+            .unwrap()
+            .with_sck(sclk)
+            .with_miso(miso)
+            .with_mosi(mosi)
+            .into_async();
+
             static EXECUTOR: StaticCell<Executor> = StaticCell::new();
             let executor = EXECUTOR.init(Executor::new());
             executor.run(|spawner| {
-                spawner.spawn(sensor_recorder().unwrap());
+                spawner.spawn(
+                    sensor_writer(
+                        spi,
+                        Output::new(cs, Level::High, OutputConfig::default()),
+                        delay,
+                    )
+                    .unwrap(),
+                );
             });
         },
     );
 
+    let i2c0 = I2c::new(
+        peripherals.I2C0,
+        i2c::master::Config::default().with_frequency(Rate::from_khz(100)),
+    )
+    .unwrap()
+    .with_sda(sda0)
+    .with_scl(scl0)
+    .into_async();
+
+    let i2c1 = I2c::new(
+        peripherals.I2C1,
+        i2c::master::Config::default().with_frequency(Rate::from_khz(100)),
+    )
+    .unwrap()
+    .with_sda(sda1)
+    .with_scl(scl1)
+    .into_async();
+
+    let shared_i2c0 = I2C0_BUS.init(Mutex::new(i2c0));
+    let shared_i2c1 = I2C1_BUS.init(Mutex::new(i2c1));
+
+    spawner.spawn(sensor_recorder(shared_i2c0, shared_i2c1).unwrap());
     loop {
         Timer::after_secs(1).await;
     }
@@ -135,22 +173,18 @@ async fn sensor_writer(spi: Spi<'static, Async>, cs: Output<'static>, delay: Del
     };
 
     loop {
-        let mut read_buffer: [u8; BUFFER_SIZE] = [1; BUFFER_SIZE];
-        let mut buffer_length = 0;
-
-        critical_section::with(|cs| {
-            buffer_length = RING.borrow(cs).borrow_mut().len();
-        });
+        let mut buffer_length = { RING.lock().await.len() }; // Automatically release the lock when scope is dropped
 
         while buffer_length > 0 {
-            critical_section::with(|cs| {
-                let mut buffer = RING.borrow(cs).borrow_mut();
+            let read_buffer: [u8; BUFFER_SIZE];
+            {
+                let mut buffer = RING.lock().await;
 
                 read_buffer = buffer
                     .dequeue()
                     .expect("Read buffer unable to dequeue. This should be protected against.");
                 buffer_length = buffer.len();
-            });
+            } // release the lock before the long synchronous sd card write
 
             sd.write(&read_buffer, &format!("{current_file_num}.leg"))
                 .unwrap();
@@ -160,14 +194,23 @@ async fn sensor_writer(spi: Spi<'static, Async>, cs: Output<'static>, delay: Del
 }
 
 #[embassy_executor::task]
-async fn sensor_recorder() {
+async fn gpio() {}
+
+#[embassy_executor::task]
+async fn sensor_recorder(
+    i2c0: &'static Mutex<CriticalSectionRawMutex, I2c<'static, Async>>,
+    i2c1: &'static Mutex<CriticalSectionRawMutex, I2c<'static, Async>>,
+) {
     let mut recorder = Recording::new();
+    let mut i2c_control_0 = I2cController::new(i2c0, true).await;
+    let mut i2c_control_1 = I2cController::new(i2c1, false).await;
     let mut ticker = Ticker::every(Duration::from_hz(RECORD_HZ));
 
     loop {
         if recorder.currently_recording {
             // expects sensor_record to be in big endian order. This can be easily switched if that doesn't make sense
             let mut sensor_record: [u8; BYTES_PER_RECORD] = [1; BYTES_PER_RECORD];
+
             // timestamp
             sensor_record[BYTES_PER_RECORD - 8..]
                 .copy_from_slice(&Instant::now().as_micros().to_be_bytes());
@@ -219,13 +262,12 @@ impl Recording {
         self.currently_recording = true;
     }
 
-    pub fn upload_buffer(&mut self) {
+    pub async fn upload_buffer(&mut self) {
         self.write_buffer[0..2].copy_from_slice(&(self.cursor as u16).to_be_bytes());
 
-        critical_section::with(|cs| {
-            let mut buffer = RING.borrow(cs).borrow_mut();
-            buffer.enqueue(self.write_buffer);
-        });
+        {
+            RING.lock().await.enqueue(self.write_buffer);
+        }
 
         self.cursor = 2;
     }

@@ -36,6 +36,12 @@ opt-level = 3
 [dependencies]
 legday-core = { path = "../legday-core" }
 
+embassy-sync = { version = "0.8" }
+
+embassy-embedded-hal = { version = "0.6" }
+
+ht16k33-async = "0.0.2"
+
 ringbuffer = "0.16.0"
 
 esp-backtrace = { version = "0.20", features = ["panic-handler", "println"] }
@@ -89,6 +95,5 @@ smoltcp = { version = "0.14.0", default-features = false, features = [
 ] }
 trouble-host = { version = "0.7.0", features = ["gatt"] }
 
-critical-section = "1.2.0"
 heapless = "0.9.1"
 static_cell = "2.1.1"
