@@ -65,14 +65,4 @@ impl I2cController {
 
         let _ = display.write_whole_display(&buffer).await;
     }
-    /*
-        let mut ht16k33 = HT16K33::new(i2c, DISP_I2C_ADDR);
-    ht16k33.initialize().expect("Failed to initialize ht16k33");
-    ht16k33.set_display(Display::ON).expect("Could not turn on the display!");
-    ht16k33.set_dimming(Dimming::BRIGHTNESS_MIN).expect("Could not set dimming!");
-
-    // Sending individual digits
-    ht16k33.update_buffer_with_digit(Index::One, 1);
-    ht16k33.write_display_buffer().unwrap();
-    */
 }

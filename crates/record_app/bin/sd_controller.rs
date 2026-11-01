@@ -89,7 +89,7 @@ impl SdController {
 
         let file = dir
             .unwrap()
-            .open_file_in_dir("{name}.leg", Mode::ReadWriteCreateOrAppend);
+            .open_file_in_dir(name, Mode::ReadWriteCreateOrAppend);
 
         if let Err(e) = file {
             error!("Could not open file {:#?}", e);

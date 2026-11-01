@@ -5,6 +5,8 @@
 
 mod bin;
 
+use crate::bin::gpio_controller::{Status, switch_loop};
+use crate::bin::imu_controller::I2cController;
 use bin::sd_controller::SdController;
 
 const RECORD_HZ: u64 = 200;
@@ -15,14 +17,13 @@ const NUM_BUFFERS: usize = 10;
 
 // BYES_PER_SECOND * RECORDS_PER_SAVE should be below ~200 kbit
 
-use core::cell::RefCell;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use esp_hal::{
     Async,
     clock::CpuClock,
     delay::Delay,
-    gpio::{Input, Level, Output, OutputConfig},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c,
     i2c::master::I2c,
     spi,
@@ -35,9 +36,9 @@ use esp_rtos::embassy::{Executor, InterruptExecutor};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 
-use static_cell::{ConstStaticCell, StaticCell};
+use static_cell::StaticCell;
 
-use esp_hal::timer::timg::{self, TimerGroup};
+use esp_hal::timer::timg::TimerGroup;
 use log::{self, error};
 use ringbuffer::{ConstGenericRingBuffer, RingBuffer};
 
@@ -48,7 +49,7 @@ use esp_backtrace as _;
 extern crate alloc;
 use alloc::format;
 
-use crate::bin::imu_controller::I2cController;
+static RECORD_STATUS: Mutex<CriticalSectionRawMutex, Status> = Mutex::new(Status::Setup);
 
 static RING: Mutex<
     CriticalSectionRawMutex,
@@ -56,7 +57,8 @@ static RING: Mutex<
 > = Mutex::new(ConstGenericRingBuffer::<[u8; BUFFER_SIZE], NUM_BUFFERS>::new());
 
 // NOTE: Be careful about passing this BETWEEN cores because can end up in spinloop, just take care
-// For other things may want to use critical_section mutex but that is caveated
+// For other things may want to use critical_section mutex that is caveated
+// CriticalSectionRawMutex may be needed for other circumstances
 static I2C0_BUS: StaticCell<Mutex<CriticalSectionRawMutex, I2c<'static, Async>>> =
     StaticCell::new();
 static I2C1_BUS: StaticCell<Mutex<CriticalSectionRawMutex, I2c<'static, Async>>> =
@@ -86,15 +88,18 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-    let sclk = peripherals.GPIO0;
-    let miso = peripherals.GPIO2;
-    let mosi = peripherals.GPIO11;
-    let cs = peripherals.GPIO12;
+    let sclk = peripherals.GPIO47;
+    let miso = peripherals.GPIO38;
+    let mosi = peripherals.GPIO21;
+    let cs = peripherals.GPIO18;
 
-    let sda0 = peripherals.GPIO4;
-    let scl0 = peripherals.GPIO5;
-    let sda1 = peripherals.GPIO6;
-    let scl1 = peripherals.GPIO7;
+    let sda0 = peripherals.GPIO11;
+    let scl0 = peripherals.GPIO12;
+    let sda1 = peripherals.GPIO13;
+    let scl1 = peripherals.GPIO14;
+
+    let recording_light = peripherals.GPIO6;
+    let recording_switch = peripherals.GPIO7;
 
     // let's spawn some tasks!
     // problematic blocking code for sd writing runs on core0
@@ -154,6 +159,20 @@ async fn main(spawner: Spawner) -> ! {
     let shared_i2c1 = I2C1_BUS.init(Mutex::new(i2c1));
 
     spawner.spawn(sensor_recorder(shared_i2c0, shared_i2c1).unwrap());
+
+    loop {
+        let current_status = { *RECORD_STATUS.lock().await };
+        if current_status != Status::Setup {
+            break;
+        }
+        Timer::after_millis(10).await;
+    }
+    let rec_switch = Input::new(recording_switch, InputConfig::default().with_pull(Pull::Up));
+    let rec_light = Output::new(recording_light, Level::Low, OutputConfig::default());
+
+    // Know that file naming has been initialized. Start the gpio task now that display can be initialized.
+    spawner.spawn(switch_loop(&RECORD_STATUS, rec_switch, rec_light, shared_i2c0).unwrap());
+
     loop {
         Timer::after_secs(1).await;
     }
@@ -194,28 +213,41 @@ async fn sensor_writer(spi: Spi<'static, Async>, cs: Output<'static>, delay: Del
 }
 
 #[embassy_executor::task]
-async fn gpio() {}
-
-#[embassy_executor::task]
 async fn sensor_recorder(
     i2c0: &'static Mutex<CriticalSectionRawMutex, I2c<'static, Async>>,
     i2c1: &'static Mutex<CriticalSectionRawMutex, I2c<'static, Async>>,
 ) {
     let mut recorder = Recording::new();
+    let mut last_status = *{ RECORD_STATUS.lock().await };
     let mut i2c_control_0 = I2cController::new(i2c0, true).await;
     let mut i2c_control_1 = I2cController::new(i2c1, false).await;
     let mut ticker = Ticker::every(Duration::from_hz(RECORD_HZ));
 
     loop {
+        let current_status = *{ RECORD_STATUS.lock().await };
+
+        if last_status != current_status {
+            match current_status {
+                Status::RecordingOff(_) => {
+                    recorder.stop_recording().await;
+                }
+                Status::RecordingOn(_) => {
+                    recorder.start_recording();
+                }
+                Status::Setup => {}
+            }
+        }
+        last_status = current_status;
+
         if recorder.currently_recording {
             // expects sensor_record to be in big endian order. This can be easily switched if that doesn't make sense
-            let mut sensor_record: [u8; BYTES_PER_RECORD] = [1; BYTES_PER_RECORD];
+            let mut sensor_record: [u8; BYTES_PER_RECORD] = [0; BYTES_PER_RECORD];
 
             // timestamp
             sensor_record[BYTES_PER_RECORD - 8..]
                 .copy_from_slice(&Instant::now().as_micros().to_be_bytes());
 
-            recorder.write_to_buffer(&sensor_record);
+            recorder.write_to_buffer(&sensor_record).await;
         }
         ticker.next().await;
     }
@@ -245,7 +277,7 @@ impl Recording {
         sensor_record[BYTES_PER_RECORD - 8..]
             .copy_from_slice(&Instant::now().as_micros().to_be_bytes());
 
-        self.write_to_buffer(&sensor_record);
+        self.write_to_buffer(&sensor_record).await;
     }
 
     pub async fn stop_recording(&mut self) {
@@ -253,11 +285,11 @@ impl Recording {
 
         // upload remaining data to buffer
         if self.cursor > 2 {
-            self.upload_buffer();
+            self.upload_buffer().await;
         }
     }
 
-    pub async fn start_recording(&mut self) {
+    pub fn start_recording(&mut self) {
         self.cursor = 2;
         self.currently_recording = true;
     }
@@ -271,7 +303,7 @@ impl Recording {
 
         self.cursor = 2;
     }
-    pub fn write_to_buffer(&mut self, data: &[u8]) {
+    pub async fn write_to_buffer(&mut self, data: &[u8]) {
         let end = self.cursor + data.len();
 
         if end < self.write_buffer.len() {
@@ -283,7 +315,7 @@ impl Recording {
 
         // let's initiate a write due to a full (or about to be full) buffer!
         if end + BYTES_PER_RECORD >= self.write_buffer.len() {
-            self.upload_buffer();
+            self.upload_buffer().await;
         }
     }
 }
