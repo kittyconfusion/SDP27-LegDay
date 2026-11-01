@@ -91,17 +91,7 @@ pub async fn switch_loop(
     let mut gpio_func = RecordingGPIO::new(bus, recording_light).await;
     let mut display_num: u16;
 
-    {
-        let current = status.lock().await;
-        display_num = match *current {
-            Status::RecordingOff(c) => c,
-            Status::RecordingOn(c) => c,
-            Status::Setup => u16::MAX,
-        };
-        gpio_func.update_display(display_num).await;
-    }
     loop {
-        switch.wait_for_any_edge().await;
         {
             let mut current = status.lock().await;
             display_num = match *current {
@@ -119,6 +109,7 @@ pub async fn switch_loop(
                 gpio_func.set_recording_light(Low);
             }
         }
+        switch.wait_for_any_edge().await;
         // Don't allow for too rapid button switching
         Timer::after_millis(200).await;
     }

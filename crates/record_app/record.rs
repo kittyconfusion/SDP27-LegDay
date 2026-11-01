@@ -36,10 +36,10 @@ use esp_rtos::embassy::{Executor, InterruptExecutor};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 
-use static_cell::StaticCell;
+use static_cell::{ConstStaticCell, StaticCell};
 
 use esp_hal::timer::timg::TimerGroup;
-use log::{self, error};
+use log::{self, error, warn};
 use ringbuffer::{ConstGenericRingBuffer, RingBuffer};
 
 // Alternative to providing our own panic_handler
@@ -66,6 +66,8 @@ static I2C1_BUS: StaticCell<Mutex<CriticalSectionRawMutex, I2c<'static, Async>>>
 
 static CORE1_STACK: StaticCell<Stack<8192>> = StaticCell::new();
 
+//static READ_BUFFER_SPACE: StaticCell<[u8; BUFFER_SIZE]> = StaticCell::new(); // keep large 8 kb read buffer in SRAM
+
 // Creates a default app-descriptor required by the esp-idf bootloader. aka makes things work right.
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -74,6 +76,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env(); // Makes error!, info!, etc. work
+    error!("RUNNING MAIN NOW");
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -133,6 +136,7 @@ async fn main(spawner: Spawner) -> ! {
                     )
                     .unwrap(),
                 );
+                error!("GOT TO END OF MAIN CORE 1");
             });
         },
     );
@@ -157,9 +161,9 @@ async fn main(spawner: Spawner) -> ! {
 
     let shared_i2c0 = I2C0_BUS.init(Mutex::new(i2c0));
     let shared_i2c1 = I2C1_BUS.init(Mutex::new(i2c1));
-
+    error!("here 1");
     spawner.spawn(sensor_recorder(shared_i2c0, shared_i2c1).unwrap());
-
+    error!("here 2");
     loop {
         let current_status = { *RECORD_STATUS.lock().await };
         if current_status != Status::Setup {
@@ -167,12 +171,14 @@ async fn main(spawner: Spawner) -> ! {
         }
         Timer::after_millis(10).await;
     }
+    error!("here 3");
     let rec_switch = Input::new(recording_switch, InputConfig::default().with_pull(Pull::Up));
     let rec_light = Output::new(recording_light, Level::Low, OutputConfig::default());
 
     // Know that file naming has been initialized. Start the gpio task now that display can be initialized.
     spawner.spawn(switch_loop(&RECORD_STATUS, rec_switch, rec_light, shared_i2c0).unwrap());
 
+    error!("GOT TO END OF MAIN CORE 0");
     loop {
         Timer::after_secs(1).await;
     }
@@ -182,33 +188,53 @@ async fn main(spawner: Spawner) -> ! {
 async fn sensor_writer(spi: Spi<'static, Async>, cs: Output<'static>, delay: Delay) {
     let mut ticker = Ticker::every(Duration::from_hz(1));
     let mut sd = SdController::new(spi, cs, delay);
+    error!("test -3");
+
+    error!("test -2");
+    static READ_BUFFER_SPACE: ConstStaticCell<[u8; BUFFER_SIZE]> =
+        ConstStaticCell::new([0u8; BUFFER_SIZE]);
+
+    // 2. Call `.take()` instead of `.init()`.
+    // This safely extracts a `&'static mut [u8; BUFFER_SIZE]` pointer with 0 stack footprint.
+    let read_buffer = READ_BUFFER_SPACE.take();
+    error!("test -1");
 
     let current_file_num = 1 + loop {
         let file_num = sd.find_last_numerical_file();
         if file_num != u16::MAX {
             break file_num; // breaks the loop and returns the value of fileNum
         }
+        error!("Unable to open SD card. Trying again.");
         ticker.next().await; // could not open sd card
     };
+
+    {
+        *RECORD_STATUS.lock().await = Status::RecordingOff(current_file_num);
+    }
 
     loop {
         let mut buffer_length = { RING.lock().await.len() }; // Automatically release the lock when scope is dropped
 
         while buffer_length > 0 {
-            let read_buffer: [u8; BUFFER_SIZE];
             {
                 let mut buffer = RING.lock().await;
+                error!("test 0");
 
-                read_buffer = buffer
-                    .dequeue()
+                let read_data: &[u8] = buffer
+                    .peek()
                     .expect("Read buffer unable to dequeue. This should be protected against.");
+                error!("test 1");
+                read_buffer.copy_from_slice(&read_data);
+                buffer.dequeue();
+                error!("test 2");
                 buffer_length = buffer.len();
             } // release the lock before the long synchronous sd card write
-
-            sd.write(&read_buffer, &format!("{current_file_num}.leg"))
+            error!("test 3");
+            sd.write(read_buffer, &format!("{current_file_num}.leg"))
                 .unwrap();
         }
         ticker.next().await;
+        error!("test 4");
     }
 }
 
