@@ -1,14 +1,14 @@
 // well this is frustrating to try to write
 // probably want to use 'd instead of 'static because might have another device on bus in the future
 
-use embedded_sdmmc::{Mode, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
+use embedded_sdmmc::{Mode, RawVolume, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 // In the future we could use SpiDMA for more efficient writing (but it's not usually writing much while doing other things)
 use core::ops::ControlFlow;
 use core::str;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_hal::gpio::Output;
 use esp_hal::{Async, delay::Delay, spi::master::Spi};
-use log::error;
+use log::{error, warn};
 
 pub struct SdController {
     time_source: DummyTimeSource,
@@ -35,6 +35,17 @@ impl SdController {
         let sdcard = SdCard::new(device, delay);
         let time_source = DummyTimeSource;
         let volume = VolumeManager::new_with_limits(sdcard, time_source, 0);
+
+        {
+            match volume.open_volume(VolumeIdx(0)) {
+                Ok(volume) => {
+                    log::info!("Success: SD Card Partition 0 is readable!");
+                }
+                Err(e) => {
+                    log::info!("Initialization structural failure: {:?}", e);
+                }
+            }
+        }
 
         Self {
             time_source,
@@ -75,6 +86,7 @@ impl SdController {
 
     // Want to catch and print every possible error for debugging purposes
     pub fn write(&mut self, data: &[u8], name: &str) -> Result<(), ()> {
+        warn!("Start of function");
         let vol = self.volume.open_volume(VolumeIdx(0));
         if let Err(e) = vol {
             error!("Could not open volume! {:#?}", e);

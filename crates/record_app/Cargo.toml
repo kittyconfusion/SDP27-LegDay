@@ -40,6 +40,8 @@ embassy-sync = { version = "0.8" }
 
 embassy-embedded-hal = { version = "0.6" }
 
+itoa = "1.0.18"
+
 ht16k33-async = "0.0.2"
 
 ringbuffer = "0.16.0"

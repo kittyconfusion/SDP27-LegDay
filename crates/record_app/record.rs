@@ -6,7 +6,7 @@
 mod bin;
 
 use crate::bin::gpio_controller::{Status, switch_loop};
-use crate::bin::imu_controller::I2cController;
+use crate::bin::i2c_controller::I2cController;
 use bin::sd_controller::SdController;
 
 const RECORD_HZ: u64 = 200;
@@ -64,7 +64,7 @@ static I2C0_BUS: StaticCell<Mutex<CriticalSectionRawMutex, I2c<'static, Async>>>
 static I2C1_BUS: StaticCell<Mutex<CriticalSectionRawMutex, I2c<'static, Async>>> =
     StaticCell::new();
 
-static CORE1_STACK: StaticCell<Stack<8192>> = StaticCell::new();
+static CORE1_STACK: StaticCell<Stack<{ 1024 * 16 * 2 }>> = StaticCell::new();
 
 //static READ_BUFFER_SPACE: StaticCell<[u8; BUFFER_SIZE]> = StaticCell::new(); // keep large 8 kb read buffer in SRAM
 
@@ -101,7 +101,7 @@ async fn main(spawner: Spawner) -> ! {
     let sda1 = peripherals.GPIO13;
     let scl1 = peripherals.GPIO14;
 
-    let recording_light = peripherals.GPIO6;
+    let recording_light: esp_hal::peripherals::GPIO6<'_> = peripherals.GPIO6;
     let recording_switch = peripherals.GPIO7;
 
     // let's spawn some tasks!
@@ -188,16 +188,7 @@ async fn main(spawner: Spawner) -> ! {
 async fn sensor_writer(spi: Spi<'static, Async>, cs: Output<'static>, delay: Delay) {
     let mut ticker = Ticker::every(Duration::from_hz(1));
     let mut sd = SdController::new(spi, cs, delay);
-    error!("test -3");
-
-    error!("test -2");
-    static READ_BUFFER_SPACE: ConstStaticCell<[u8; BUFFER_SIZE]> =
-        ConstStaticCell::new([0u8; BUFFER_SIZE]);
-
-    // 2. Call `.take()` instead of `.init()`.
-    // This safely extracts a `&'static mut [u8; BUFFER_SIZE]` pointer with 0 stack footprint.
-    let read_buffer = READ_BUFFER_SPACE.take();
-    error!("test -1");
+    // let mut num_str = itoa_buf.format(num);
 
     let current_file_num = 1 + loop {
         let file_num = sd.find_last_numerical_file();
@@ -213,28 +204,12 @@ async fn sensor_writer(spi: Spi<'static, Async>, cs: Output<'static>, delay: Del
     }
 
     loop {
-        let mut buffer_length = { RING.lock().await.len() }; // Automatically release the lock when scope is dropped
-
-        while buffer_length > 0 {
-            {
-                let mut buffer = RING.lock().await;
-                error!("test 0");
-
-                let read_data: &[u8] = buffer
-                    .peek()
-                    .expect("Read buffer unable to dequeue. This should be protected against.");
-                error!("test 1");
-                read_buffer.copy_from_slice(&read_data);
-                buffer.dequeue();
-                error!("test 2");
-                buffer_length = buffer.len();
-            } // release the lock before the long synchronous sd card write
-            error!("test 3");
-            sd.write(read_buffer, &format!("{current_file_num}.leg"))
-                .unwrap();
+        while let Some(read_data) = { RING.lock().await.dequeue() } {
+            sd.write(&read_data, &format!("12.leg"))
+                .expect("File is do broke :-(");
         }
+
         ticker.next().await;
-        error!("test 4");
     }
 }
 
@@ -248,6 +223,9 @@ async fn sensor_recorder(
     let mut i2c_control_0 = I2cController::new(i2c0, true).await;
     let mut i2c_control_1 = I2cController::new(i2c1, false).await;
     let mut ticker = Ticker::every(Duration::from_hz(RECORD_HZ));
+
+    // Setup the IMUs
+    
 
     loop {
         let current_status = *{ RECORD_STATUS.lock().await };

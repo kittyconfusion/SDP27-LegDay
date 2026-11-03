@@ -1892,6 +1892,7 @@ dependencies = [
  "esp-rtos",
  "heapless 0.9.3",
  "ht16k33-async",
+ "itoa",
  "legday-core",
  "log",
  "ringbuffer",
