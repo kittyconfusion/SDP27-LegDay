@@ -19,10 +19,10 @@ const PERIOD_US: u64 = 20_000;
 const HEADER: &str =
     "seq,t_us,read_us,sensor_id,ax_m_s2,ay_m_s2,az_m_s2,gx_rad_s,gy_rad_s,gz_rad_s";
 
-pub struct IMU_Controller {
+pub struct ImuController {
     i2c_bus: &'static Mutex<CriticalSectionRawMutex, I2c<'static, Async>>,
 }
-impl IMU_Controller {
+impl ImuController {
     pub async fn new(
         i2c_bus: &'static Mutex<CriticalSectionRawMutex, I2c<'static, Async>>,
     ) -> Self {
@@ -97,7 +97,7 @@ impl IMU_Controller {
         block_for(Duration::from_millis(100));
         Ok(())
     }
-
+    /*
     pub async fn collect_data(&self, address: u8) {
         let result = async {
             // putting this in the inner parenthesis causes problems for some reason
@@ -138,7 +138,7 @@ impl IMU_Controller {
                 Ok(None)
             }
         }
-    }
+    }*/
 }
 
 fn micros() -> u64 {

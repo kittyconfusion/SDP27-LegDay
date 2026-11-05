@@ -5,20 +5,22 @@
 
 mod bin;
 
-use crate::bin::gpio_controller::{Status, switch_loop};
-use crate::bin::i2c_controller::I2cController;
+use bin::gpio_controller::{Status, gpio_loop};
 use bin::sd_controller::SdController;
 
-const RECORD_HZ: u64 = 200;
+const RECORD_HZ: u64 = 200; // Frequency of sensor data collection
 // 4 IMU * (6 BYTES) + 4 PRESSURE * (2 BYTES) + 1 TIMESTAMP_MS * (8 BYTES) = 40
 const BYTES_PER_RECORD: usize = 24 + 8 + 8;
+// Define the circular ring buffer used for sharing data between sensor and sd card threads
 const BUFFER_SIZE: usize = 8192;
 const NUM_BUFFERS: usize = 10;
 
-// BYES_PER_SECOND * RECORDS_PER_SAVE should be below ~200 kbit
-
+// THREADING
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Ticker, Timer};
+use esp_rtos::embassy::Executor;
+
+// HARDWARE INTERFACES
 use esp_hal::{
     Async,
     clock::CpuClock,
@@ -30,25 +32,28 @@ use esp_hal::{
     spi::master::Spi,
     system::Stack,
     time::Rate,
+    timer::timg::TimerGroup,
 };
-use esp_rtos::embassy::{Executor, InterruptExecutor};
 
+// SHARED DATA
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 
-use static_cell::{ConstStaticCell, StaticCell};
+// RESERVE LARGE MEMORY BLOCKS
+use static_cell::StaticCell;
 
-use esp_hal::timer::timg::TimerGroup;
-use log::{self, error, warn};
+// SHARED BUFFER
 use ringbuffer::{ConstGenericRingBuffer, RingBuffer};
 
-// Alternative to providing our own panic_handler
-// should print backtrace to serial upon fatal error
 use esp_backtrace as _;
+use log::{self, debug, error, info, warn};
 
 extern crate alloc;
+
+// FANCY STRING FORMATTING
 use alloc::format;
 
+//  === THREAD-SAFE VARIABLES ===
 static RECORD_STATUS: Mutex<CriticalSectionRawMutex, Status> = Mutex::new(Status::Setup);
 
 static RING: Mutex<
@@ -64,9 +69,8 @@ static I2C0_BUS: StaticCell<Mutex<CriticalSectionRawMutex, I2c<'static, Async>>>
 static I2C1_BUS: StaticCell<Mutex<CriticalSectionRawMutex, I2c<'static, Async>>> =
     StaticCell::new();
 
+// CORE 1 HAS 32 K OF STACK SPACE
 static CORE1_STACK: StaticCell<Stack<{ 1024 * 16 * 2 }>> = StaticCell::new();
-
-//static READ_BUFFER_SPACE: StaticCell<[u8; BUFFER_SIZE]> = StaticCell::new(); // keep large 8 kb read buffer in SRAM
 
 // Creates a default app-descriptor required by the esp-idf bootloader. aka makes things work right.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -76,7 +80,9 @@ esp_bootloader_esp_idf::esp_app_desc!();
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env(); // Makes error!, info!, etc. work
-    error!("RUNNING MAIN NOW");
+    info!("Start'er up");
+
+    // ======= BOILERPLACE INITIALIZATION ========
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -91,30 +97,39 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
+    // ======= GPIO PINS =======
+    // SPI
     let sclk = peripherals.GPIO47;
     let miso = peripherals.GPIO38;
     let mosi = peripherals.GPIO21;
     let cs = peripherals.GPIO18;
-
+    // I2C 0
     let sda0 = peripherals.GPIO11;
     let scl0 = peripherals.GPIO12;
+    // I2C 1
     let sda1 = peripherals.GPIO13;
     let scl1 = peripherals.GPIO14;
 
-    let recording_light: esp_hal::peripherals::GPIO6<'_> = peripherals.GPIO6;
+    let recording_light = peripherals.GPIO6;
     let recording_switch = peripherals.GPIO7;
 
-    // let's spawn some tasks!
-    // problematic blocking code for sd writing runs on core0
-    // gpio control and the key sensor read task run on core1
+    // ======= THREAD SETUP =======
+    // Core 0 needs to setup both I2C busses
+    // THREAD: Sensors and Data -> Buffer
+    // THREAD: GPIO
+    // Core 1 needs to setup SPI bus
+    // THREAD: SD Writer
 
+    // Start Core 1, create SPI bus, and start SD thread
     esp_rtos::start_second_core(
         peripherals.CPU_CTRL,
         peripherals.FROM_CPU_INTR1,
         CORE1_STACK.init(Stack::new()),
         move || {
+            // Setup as async even though the SD library is entirely blocking
+            // This is a regretable oversight (will be changed in the future but it works as is)
             let spi = Spi::new(
-                peripherals.SPI2,
+                peripherals.SPI2, // SPI 0 and 1 are for Flash and PSRAM
                 spi::master::Config::default()
                     .with_frequency(Rate::from_khz(400))
                     .with_mode(spi::Mode::_0),
@@ -125,10 +140,12 @@ async fn main(spawner: Spawner) -> ! {
             .with_mosi(mosi)
             .into_async();
 
+            // Core 1 needs its own executor so that Core 0 can still spawn tasks
             static EXECUTOR: StaticCell<Executor> = StaticCell::new();
             let executor = EXECUTOR.init(Executor::new());
             executor.run(|spawner| {
                 spawner.spawn(
+                    // Start the SD thread
                     sensor_writer(
                         spi,
                         Output::new(cs, Level::High, OutputConfig::default()),
@@ -136,11 +153,13 @@ async fn main(spawner: Spawner) -> ! {
                     )
                     .unwrap(),
                 );
-                error!("GOT TO END OF MAIN CORE 1");
+                info!("Core 1 fully initialized");
             });
         },
     );
 
+    // ======= CORE 0 THREADING =======
+    // Setup async I2C busses and add them to their mutex to allow multiple-thread use
     let i2c0 = I2c::new(
         peripherals.I2C0,
         i2c::master::Config::default().with_frequency(Rate::from_khz(100)),
@@ -159,11 +178,14 @@ async fn main(spawner: Spawner) -> ! {
     .with_scl(scl1)
     .into_async();
 
+    // These are currently only used by 1 thread but it should be trivial to share usage
     let shared_i2c0 = I2C0_BUS.init(Mutex::new(i2c0));
     let shared_i2c1 = I2C1_BUS.init(Mutex::new(i2c1));
-    error!("here 1");
+
     spawner.spawn(sensor_recorder(shared_i2c0, shared_i2c1).unwrap());
-    error!("here 2");
+
+    // Wait for RECORD_STATUS to be initialized by the SD card thread
+    // Starts in Record::Setup and eventually moved to OFF/ON with next file number
     loop {
         let current_status = { *RECORD_STATUS.lock().await };
         if current_status != Status::Setup {
@@ -171,41 +193,60 @@ async fn main(spawner: Spawner) -> ! {
         }
         Timer::after_millis(10).await;
     }
-    error!("here 3");
+
     let rec_switch = Input::new(recording_switch, InputConfig::default().with_pull(Pull::Up));
     let rec_light = Output::new(recording_light, Level::Low, OutputConfig::default());
 
     // Know that file naming has been initialized. Start the gpio task now that display can be initialized.
-    spawner.spawn(switch_loop(&RECORD_STATUS, rec_switch, rec_light, shared_i2c0).unwrap());
+    spawner.spawn(gpio_loop(&RECORD_STATUS, rec_switch, rec_light, shared_i2c0).unwrap());
 
-    error!("GOT TO END OF MAIN CORE 0");
+    info!("Core 0 fully initialized");
+
+    // Core 0 cannot return from main. This makes sure that idle time is spent in
+    // yielding sleep as opposed to a spinlock
     loop {
         Timer::after_secs(1).await;
     }
 }
 
+// SD Card Thread Main Loop
 #[embassy_executor::task]
 async fn sensor_writer(spi: Spi<'static, Async>, cs: Output<'static>, delay: Delay) {
-    let mut ticker = Ticker::every(Duration::from_hz(1));
+    let mut ticker = Ticker::every(Duration::from_hz(1)); // Run every second
     let mut sd = SdController::new(spi, cs, delay);
-    // let mut num_str = itoa_buf.format(num);
 
-    let current_file_num = 1 + loop {
+    // We do not want to overwrite an existing file. Therefore keep trying to figure out
+    // what the next available file number is
+    let mut current_file_num = 1 + loop {
         let file_num = sd.find_last_numerical_file();
         if file_num != u16::MAX {
-            break file_num; // breaks the loop and returns the value of fileNum
+            break file_num; // breaks the loop and returns the value of file_num
         }
         error!("Unable to open SD card. Trying again.");
-        ticker.next().await; // could not open sd card
+        ticker.next().await; // could not open sd card so wait another second and try again
     };
 
+    // Get out of global recording setup mode and "upload" current_file_num
     {
+        // Do not lock for longer than the minimum time
         *RECORD_STATUS.lock().await = Status::RecordingOff(current_file_num);
     }
 
+    // While there is data to write
+    //   Figure out what file number we should use
+    //   Write it
+    // Yield until the next second increment
     loop {
         while let Some(read_data) = { RING.lock().await.dequeue() } {
-            sd.write(&read_data, &format!("12.leg"))
+            {
+                let current_record_status = RECORD_STATUS.lock().await;
+                current_file_num = match *current_record_status {
+                    Status::RecordingOff(num) => num,
+                    Status::RecordingOn(num) => num,
+                    Status::Setup => current_file_num,
+                }
+            }
+            sd.write(&read_data, &format!("{current_file_num}.leg"))
                 .expect("File is do broke :-(");
         }
 
@@ -213,29 +254,36 @@ async fn sensor_writer(spi: Spi<'static, Async>, cs: Output<'static>, delay: Del
     }
 }
 
+// Sensor Data Collection Main Loop
+// Also "uploads" data to buffer
+// and Starts / Stops data recording
 #[embassy_executor::task]
 async fn sensor_recorder(
     i2c0: &'static Mutex<CriticalSectionRawMutex, I2c<'static, Async>>,
     i2c1: &'static Mutex<CriticalSectionRawMutex, I2c<'static, Async>>,
 ) {
-    let mut recorder = Recording::new();
+    let mut recorder = Recording::new(); // Buffer Controller
+    // Remember the last state so we know if recording should be started / stopped
     let mut last_status = *{ RECORD_STATUS.lock().await };
-    let mut i2c_control_0 = I2cController::new(i2c0, true).await;
-    let mut i2c_control_1 = I2cController::new(i2c1, false).await;
     let mut ticker = Ticker::every(Duration::from_hz(RECORD_HZ));
 
-    // Setup the IMUs
-    
+    // ===================================
+    // TODO: Setup the IMUs / IMU Controller for each I2C bus
+    // ===================================
 
     loop {
+        // Determine if GPIO has requested a start of stop to data collection
+        // either stop_recording or start_recording will be called if need be
         let current_status = *{ RECORD_STATUS.lock().await };
 
         if last_status != current_status {
             match current_status {
                 Status::RecordingOff(_) => {
+                    info!("Changing recording status to OFF");
                     recorder.stop_recording().await;
                 }
                 Status::RecordingOn(_) => {
+                    info!("Changing recording status to ON");
                     recorder.start_recording();
                 }
                 Status::Setup => {}
@@ -243,11 +291,12 @@ async fn sensor_recorder(
         }
         last_status = current_status;
 
+        // create a new sensor data block, collect data, and push to the current sensor data buffer
         if recorder.currently_recording {
             // expects sensor_record to be in big endian order. This can be easily switched if that doesn't make sense
             let mut sensor_record: [u8; BYTES_PER_RECORD] = [0; BYTES_PER_RECORD];
 
-            // timestamp
+            // insert timestamp at the end of a record
             sensor_record[BYTES_PER_RECORD - 8..]
                 .copy_from_slice(&Instant::now().as_micros().to_be_bytes());
 
@@ -258,9 +307,17 @@ async fn sensor_recorder(
 }
 
 pub struct Recording {
-    // Structure: 2b block size (inclusize of themselves), 6b IMU x4, 2b Press x4, 8b time, 6b IMU x4, 2b Press x4, 8b time, ...
+    // STRUCTURE
+    // 2  bytes Block Size in bytes, inclusive
+    // 24 bytes Raw IMU Data x4
+    // 8  bytes Raw Pressure Data x4
+    // 24 bytes Raw IMU Data x4
+    // 8  bytes Raw Pressure Data x4
+    // .............................
+    // end padded with 0 until BUFFER_SIZE
     write_buffer: [u8; BUFFER_SIZE],
-    // don't need > 64k block so even though usize = u32, will cast to u16 when transcribing
+    // Current place in the write_buffer
+    // don't need > 64k block so even though usize is u32, will cast to u16 when transcribing
     cursor: usize,
     currently_recording: bool,
 }
@@ -274,20 +331,10 @@ impl Recording {
         }
     }
 
-    pub async fn write_empty_record(&mut self) {
-        // expects sensor_record to be in big endian order. This can be easily switched if that doesn't make sense
-        let mut sensor_record: [u8; BYTES_PER_RECORD] = [0; BYTES_PER_RECORD];
-        // timestamp
-        sensor_record[BYTES_PER_RECORD - 8..]
-            .copy_from_slice(&Instant::now().as_micros().to_be_bytes());
-
-        self.write_to_buffer(&sensor_record).await;
-    }
-
     pub async fn stop_recording(&mut self) {
         self.currently_recording = false;
 
-        // upload remaining data to buffer
+        // always upload remaining data to buffer
         if self.cursor > 2 {
             self.upload_buffer().await;
         }
@@ -298,6 +345,7 @@ impl Recording {
         self.currently_recording = true;
     }
 
+    // Transcribe the final write_buffer used length and upload its data to the thread-shared ring buffer
     pub async fn upload_buffer(&mut self) {
         self.write_buffer[0..2].copy_from_slice(&(self.cursor as u16).to_be_bytes());
 
@@ -305,8 +353,10 @@ impl Recording {
             RING.lock().await.enqueue(self.write_buffer);
         }
 
-        self.cursor = 2;
+        self.cursor = 2; // Reserved for final write_buffer length
     }
+
+    // Writes to the write_buffer an input sensor record and initiate an "upload" if almost full
     pub async fn write_to_buffer(&mut self, data: &[u8]) {
         let end = self.cursor + data.len();
 
