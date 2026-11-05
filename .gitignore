@@ -27,3 +27,8 @@ target/
 .claude/
 # Untrained CNN benchmark models (regenerate: python3 Scripts/train_classifier.py bench-models)
 crates/legday-classifier/models/bench/
+
+# Local radio credentials and generated telemetry captures.
+.networking.local.env
+telemetry-captures/
+Scripts/__pycache__/

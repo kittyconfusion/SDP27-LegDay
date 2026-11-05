@@ -5,11 +5,20 @@ members = [
     "crates/ulp_app",
     "crates/legday-core",
     "crates/legday-classifier",
+    "crates/networking-playground",
     "crates/legday-icm20948"]
 default-members = ["crates/main_app"]
 
 [profile.dev]
 opt-level = "s"
+
+# esp-radio documents a requirement for optimization level 2 or 3, including
+# release builds. Keep this local to the driver rather than changing the CNN.
+[profile.dev.package.esp-radio]
+opt-level = 3
+
+[profile.release.package.esp-radio]
+opt-level = 3
 
 [profile.release]
 codegen-units = 1

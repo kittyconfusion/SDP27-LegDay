@@ -93,6 +93,10 @@ Branch `tim/testing-memory-and-sensors` adds a real ICM-20948 driver, the
 120-byte fused frame with orientation computed on the S3, and the
 `imu-sensor-test` firmware; see [the IMU bring-up notes](docs/imu-bringup.md)
 and run it with `bash crates/scripts/firmware.sh imu /dev/cu.usbmodemXXXX`.
+
+The independent [networking playground](docs/networking-playground.md) builds
+offline, Wi-Fi UDP, or BLE telemetry experiments with simulated data and a shared
+Python collector. It includes RAM comparisons and board-to-Mac bench results.
 The motion classifier (data collection, training on a Mac, running on the
 board, measured limits) is described in [the classifier guide](docs/classifier.md).
 
