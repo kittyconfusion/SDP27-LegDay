@@ -93,7 +93,7 @@ impl SdController {
         let _ = dir.iterate_dir(|entry| {
             if let Ok(num_str) = str::from_utf8(entry.name.base_name()) {
                 if let Ok(num) = num_str.parse::<u16>() {
-                    if highest_numerical > num {
+                    if num > highest_numerical {
                         highest_numerical = num;
                     }
                 }
@@ -101,6 +101,7 @@ impl SdController {
             // Needed to iterate through this special type of loop
             ControlFlow::Continue(())
         });
+        info!("Found highest file number as {highest_numerical}.LEG");
 
         // Close directory and volume in reverse order of opening
         let _ = self.volume_manager.close_dir(dir.to_raw_directory());

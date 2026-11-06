@@ -3,6 +3,8 @@
 #![deny(clippy::mem_forget)] // Should not be used so deny
 #![deny(clippy::large_stack_frames)] // General compiler error if allocate > 512kb at a time (main function given exemption)
 
+// Run record-app with "cargo run --package quadriceps"
+
 mod bin;
 
 use bin::gpio_controller::{Status, gpio_loop};
@@ -56,6 +58,7 @@ use alloc::format;
 //  === THREAD-SAFE VARIABLES ===
 static RECORD_STATUS: Mutex<CriticalSectionRawMutex, Status> = Mutex::new(Status::Setup);
 
+// Main thread-shared data buffer. RingBuffer loops around instead of overflowing and handles a whole lot for us
 static RING: Mutex<
     CriticalSectionRawMutex,
     ConstGenericRingBuffer<[u8; BUFFER_SIZE], NUM_BUFFERS>,
@@ -141,6 +144,7 @@ async fn main(spawner: Spawner) -> ! {
             .into_async();
 
             // Core 1 needs its own executor so that Core 0 can still spawn tasks
+            // For the future: Executors can have special interrupt-driven priorities to ensure they run on time
             static EXECUTOR: StaticCell<Executor> = StaticCell::new();
             let executor = EXECUTOR.init(Executor::new());
             executor.run(|spawner| {
@@ -217,7 +221,7 @@ async fn sensor_writer(spi: Spi<'static, Async>, cs: Output<'static>, delay: Del
 
     // We do not want to overwrite an existing file. Therefore keep trying to figure out
     // what the next available file number is
-    let mut current_file_num = 1 + loop {
+    let mut current_file_num = loop {
         let file_num = sd.find_last_numerical_file();
         if file_num != u16::MAX {
             break file_num; // breaks the loop and returns the value of file_num

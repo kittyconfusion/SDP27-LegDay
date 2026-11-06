@@ -113,12 +113,12 @@ pub async fn gpio_loop(
             };
             // Change the global status' actual value instead of making a copy
             if switch.is_high() {
-                *current = Status::RecordingOn(display_num);
+                *current = Status::RecordingOn(display_num + 1);
                 gpio_helper.set_recording_light(High);
             }
             if switch.is_low() {
-                *current = Status::RecordingOff(display_num + 1);
-                gpio_helper.update_display(display_num).await;
+                *current = Status::RecordingOff(display_num);
+                gpio_helper.update_display(display_num + 1).await; // Show the next file to be written to
                 gpio_helper.set_recording_light(Low);
             }
         }
