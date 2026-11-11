@@ -77,10 +77,17 @@ impl AcquisitionMode {
     }
 }
 
-// Match Nathan's existing bin/imu_controller.rs exactly. This divider means
-// 1125 / (19 + 1) = 56.25 Hz nominal sensor output, NOT 200 fresh samples/s.
-// The recorder's scheduling and any change to these settings belong to its owner.
-pub const IMU_SAMPLE_RATE_DIV: u8 = 19;
+// Shared by the recorder and hardware check to prevent mismatched settings.
+// Changed from Nathan's divider 19 at the user's request for 225-Hz acquisition.
+// 1125 / (4 + 1) = 225 Hz nominal IMU output; ranges/filters stay unchanged.
+pub const SAMPLE_HZ: u64 = 225;
+pub const IMU_SAMPLE_RATE_DIV: u8 = (1125 / SAMPLE_HZ - 1) as u8;
+const _: () =
+    assert!(SAMPLE_HZ > 0 && SAMPLE_HZ <= 1125 && 1125 % SAMPLE_HZ == 0 && 1125 / SAMPLE_HZ <= 256);
+// Faster transfers give the two IMUs per bus headroom within each ~4.44 ms poll.
+// TODO(Nathan, Tim): verify wiring/pull-ups/display at 400 kHz and measured fresh
+// counts at 225 Hz. Equal nominal rates do not synchronize physical sample times.
+pub const I2C_BUS_KHZ: u32 = 400;
 pub const IMU_GYRO_CONFIG: u8 = 0x25; // +/-1000 deg/s, DLPF 4 enabled
 pub const IMU_ACCEL_CONFIG: u8 = 0x25; // +/-8 g, DLPF 4 enabled
 pub const ACCEL_COUNTS_PER_G: f32 = 4096.0;
@@ -92,11 +99,17 @@ mod tests {
 
     #[test]
     fn demo_removes_only_the_lower_non_prosthetic_slot() {
-        let removed = AcquisitionMode::Training.enabled_imu_mask()
-            ^ AcquisitionMode::Demo.enabled_imu_mask();
+        let removed =
+            AcquisitionMode::Training.enabled_imu_mask() ^ AcquisitionMode::Demo.enabled_imu_mask();
         assert_eq!(removed, 1 << ImuSlot::NonProstheticLower as usize);
-        assert_eq!(IMU_LAYOUT[ImuSlot::NonProstheticLower as usize].address, 0x68);
-        assert_eq!(IMU_LAYOUT[ImuSlot::NonProstheticLower as usize].bus, BusId::I2c0);
+        assert_eq!(
+            IMU_LAYOUT[ImuSlot::NonProstheticLower as usize].address,
+            0x68
+        );
+        assert_eq!(
+            IMU_LAYOUT[ImuSlot::NonProstheticLower as usize].bus,
+            BusId::I2c0
+        );
     }
 
     #[test]

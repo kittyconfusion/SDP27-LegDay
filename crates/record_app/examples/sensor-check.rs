@@ -26,7 +26,7 @@ use esp_hal::{
 use esp_println::println;
 use sensors::{
     ImuReader, PressureReader, SensorReader,
-    config::{AcquisitionMode, IMU_LAYOUT},
+    config::{AcquisitionMode, I2C_BUS_KHZ, IMU_LAYOUT, SAMPLE_HZ},
     imu::SharedI2c,
     sample::ImuReading,
 };
@@ -51,13 +51,16 @@ async fn main(_spawner: Spawner) -> ! {
     println!("Sensor check: {:?}; raw counts only", MODE);
     println!("I2C0 A4/A5 (GPIO11/12); I2C1 A6/A7 (GPIO13/14)");
     println!("Pressure A0..A3 (GPIO1..4); diagnostic polling every 100 ms");
-    println!("IMU settings match Nathan: +/-8 g, +/-1000 deg/s, nominal 56.25 Hz");
+    println!(
+        "IMU settings: +/-8 g, +/-1000 deg/s, nominal {} Hz",
+        SAMPLE_HZ
+    );
 
-    // Same pins and 100 kHz bus speed as Nathan's record.rs. This standalone
+    // Same pins and configured bus speed as record.rs. This standalone
     // program owns its peripherals; it does not run alongside his recorder.
     let i2c0 = I2c::new(
         peripherals.I2C0,
-        I2cConfig::default().with_frequency(Rate::from_khz(100)),
+        I2cConfig::default().with_frequency(Rate::from_khz(I2C_BUS_KHZ)),
     )
     .expect("I2C0 configuration")
     .with_sda(peripherals.GPIO11)
@@ -65,7 +68,7 @@ async fn main(_spawner: Spawner) -> ! {
     .into_async();
     let i2c1 = I2c::new(
         peripherals.I2C1,
-        I2cConfig::default().with_frequency(Rate::from_khz(100)),
+        I2cConfig::default().with_frequency(Rate::from_khz(I2C_BUS_KHZ)),
     )
     .expect("I2C1 configuration")
     .with_sda(peripherals.GPIO13)
@@ -101,7 +104,9 @@ async fn main(_spawner: Spawner) -> ! {
         let sample = reader.read().await;
         println!(
             "Read {}..{} us; fresh IMU mask 0b{:04b}",
-            sample.read_started_us, sample.read_completed_us, sample.fresh_imu_mask(),
+            sample.read_started_us,
+            sample.read_completed_us,
+            sample.fresh_imu_mask(),
         );
         for (assignment, reading) in IMU_LAYOUT.iter().zip(&sample.imus) {
             match reading {

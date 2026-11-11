@@ -11,14 +11,14 @@ use bin::gpio_controller::{Status, gpio_loop};
 use bin::sd_controller::SdController;
 use bin::sensors::{
     ImuReader, PressureReader, SensorReader,
-    config::AcquisitionMode,
+    config::{AcquisitionMode, I2C_BUS_KHZ, SAMPLE_HZ},
     frame::{self, SensorFrame},
 };
 
-// TODO(Nathan, Tim): 200 Hz is the requested polling cadence, NOT a verified
-// fresh-data rate. Nathan's retained IMU divider produces nominally 56.25 Hz;
-// 100 kHz buses/display contention also need measuring before changing rates.
-const RECORD_HZ: u64 = 200;
+// One shared rate sets both polling and the hardware divider in config.rs.
+// TODO(Nathan, Tim): verify sustained fresh counts and synchronization on hardware;
+// a nominal 225-Hz setting does not guarantee every frame has four fresh IMUs.
+const RECORD_HZ: u64 = SAMPLE_HZ;
 // Tim's 120-byte little-endian payload replaces the old 40-byte placeholder.
 const BYTES_PER_RECORD: usize = frame::FRAME_BYTES;
 // Change to Demo to omit only the removable non-prosthetic lower reference.
@@ -190,7 +190,7 @@ async fn main(spawner: Spawner) -> ! {
     // Setup async I2C busses and add them to their mutex to allow multiple-thread use
     let i2c0 = I2c::new(
         peripherals.I2C0,
-        i2c::master::Config::default().with_frequency(Rate::from_khz(100)),
+        i2c::master::Config::default().with_frequency(Rate::from_khz(I2C_BUS_KHZ)),
     )
     .unwrap()
     .with_sda(sda0)
@@ -199,7 +199,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let i2c1 = I2c::new(
         peripherals.I2C1,
-        i2c::master::Config::default().with_frequency(Rate::from_khz(100)),
+        i2c::master::Config::default().with_frequency(Rate::from_khz(I2C_BUS_KHZ)),
     )
     .unwrap()
     .with_sda(sda1)
@@ -349,7 +349,7 @@ async fn sensor_recorder(
             }
         }
         // Do not spin trying to catch up missed deadlines. Log measured rates
-        // so a nominal 200-Hz ticker cannot be confused with fresh IMU output.
+        // so the nominal polling cadence cannot be confused with fresh IMU output.
         if Instant::now().as_micros() - sample.read_started_us >= 1_000_000 / RECORD_HZ {
             overruns += 1;
             ticker.reset();

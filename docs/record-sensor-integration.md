@@ -13,7 +13,7 @@ Training uses four IMUs; Demo disables only slot 1 (non-prosthetic lower). All f
 
 ## Agree with Nathan and Tim
 
-- **Rate:** loop target is 200 Hz; retained IMU settings produce nominally 56.25 Hz. Measure throughput and agree on rates/synchronization. Current ranges: +/-8g, +/-1000 degrees/s.
+- **Rate:** `config.rs` now sets both the recording loop and nominal IMU output to 225 Hz (divider 4). Recorder and USB test use 400 kHz I2C for transfer headroom; the test still prints slowly. Verify fresh counts, synchronization, and wiring/display at 400 kHz. Ranges/filters remain unchanged: +/-8g, +/-1000 degrees/s. The unused legacy `bin/imu_controller.rs` is not initialized by this recorder.
 - **Quaternions/timing:** Tim supplies orientation and flags. Current timestamp is MCU read start; sensors are not synchronized.
 - **File readers:** each 8192-byte SD block starts with a two-byte **big-endian inclusive used length**, followed by 120-byte **little-endian** frames and padding. Decode only `block[2..used]`. Old 40-byte recordings are incompatible; agree on versioning/decoder updates.
 - **Live output:** latest-frame access is ready; PC transport still needs connecting. Slow readers skip frames.

@@ -106,7 +106,8 @@ impl ImuReader {
         {
             let mut i2c = bus.lock().await;
             select_bank(&mut i2c, address, 2).await?;
-            // Same ranges, filters and dividers as Nathan's IMU controller.
+            // Retain Nathan's ranges/filters; use config.rs's shared sample-rate
+            // divider so hardware output matches the recorder's nominal cadence.
             for (register, value) in [
                 (0x00, IMU_SAMPLE_RATE_DIV),
                 (0x01, IMU_GYRO_CONFIG),
@@ -139,7 +140,7 @@ impl ImuReader {
     /// Poll both independent buses concurrently, preserving fixed output slots.
     /// Devices sharing a bus remain sequential, and the display keeps its mutex.
     /// TODO(Nathan, Tim): this overlaps bus transfers, not physical sample times;
-    /// agree on ODR/FIFO/synchronization before promising 200 fresh samples/sec.
+    /// verify ODR/FIFO/synchronization before promising 225 fresh samples/sec.
     /// This polls latest registers, so intermediate hardware samples may be
     /// skipped if the caller is late. It does not promise lossless capture.
     pub async fn read(&mut self) -> [ImuReading<Error>; IMU_COUNT] {
