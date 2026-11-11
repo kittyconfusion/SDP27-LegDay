@@ -9,10 +9,21 @@ mod bin;
 
 use bin::gpio_controller::{Status, gpio_loop};
 use bin::sd_controller::SdController;
+use bin::sensors::{
+    ImuReader, PressureReader, SensorReader,
+    config::AcquisitionMode,
+    frame::{self, SensorFrame},
+};
 
-const RECORD_HZ: u64 = 200; // Frequency of sensor data collection
-// 4 IMU * (6 BYTES) + 4 PRESSURE * (2 BYTES) + 1 TIMESTAMP_MS * (8 BYTES) = 40
-const BYTES_PER_RECORD: usize = 24 + 8 + 8;
+// TODO(Nathan, Tim): 200 Hz is the requested polling cadence, NOT a verified
+// fresh-data rate. Nathan's retained IMU divider produces nominally 56.25 Hz;
+// 100 kHz buses/display contention also need measuring before changing rates.
+const RECORD_HZ: u64 = 200;
+// Tim's 120-byte little-endian payload replaces the old 40-byte placeholder.
+const BYTES_PER_RECORD: usize = frame::FRAME_BYTES;
+// Change to Demo to omit only the removable non-prosthetic lower reference.
+// TODO(Nathan, Tim): agree how the final application selects training/demo.
+const ACQUISITION_MODE: AcquisitionMode = AcquisitionMode::Training;
 // Define the circular ring buffer used for sharing data between sensor and sd card threads
 const BUFFER_SIZE: usize = 8192;
 const NUM_BUFFERS: usize = 10;
@@ -58,11 +69,24 @@ use alloc::format;
 //  === THREAD-SAFE VARIABLES ===
 static RECORD_STATUS: Mutex<CriticalSectionRawMutex, Status> = Mutex::new(Status::Setup);
 
+// Acquisition continues while SD recording is off. A future simulation transport
+// can copy this snapshot without owning/reinitializing the hardware reader.
+// TODO(Nathan, Tim): this is latest-only, not a lossless stream. Transport and
+// quaternion generation remain their owners' work; use sequence to spot gaps.
+static LATEST_SENSOR_FRAME: Mutex<CriticalSectionRawMutex, Option<SensorFrame>> = Mutex::new(None);
+
+pub async fn latest_sensor_frame() -> Option<SensorFrame> {
+    *LATEST_SENSOR_FRAME.lock().await
+}
+
 // Main thread-shared data buffer. RingBuffer loops around instead of overflowing and handles a whole lot for us
 static RING: Mutex<
     CriticalSectionRawMutex,
-    ConstGenericRingBuffer<[u8; BUFFER_SIZE], NUM_BUFFERS>,
-> = Mutex::new(ConstGenericRingBuffer::<[u8; BUFFER_SIZE], NUM_BUFFERS>::new());
+    ConstGenericRingBuffer<(u16, [u8; BUFFER_SIZE]), NUM_BUFFERS>,
+> = Mutex::new(ConstGenericRingBuffer::<
+    (u16, [u8; BUFFER_SIZE]),
+    NUM_BUFFERS,
+>::new());
 
 // NOTE: Be careful about passing this BETWEEN cores because can end up in spinloop, just take care
 // For other things may want to use critical_section mutex that is caveated
@@ -186,7 +210,14 @@ async fn main(spawner: Spawner) -> ! {
     let shared_i2c0 = I2C0_BUS.init(Mutex::new(i2c0));
     let shared_i2c1 = I2C1_BUS.init(Mutex::new(i2c1));
 
-    spawner.spawn(sensor_recorder(shared_i2c0, shared_i2c1).unwrap());
+    let pressure = PressureReader::new(
+        peripherals.ADC1,
+        peripherals.GPIO1,
+        peripherals.GPIO2,
+        peripherals.GPIO3,
+        peripherals.GPIO4,
+    );
+    spawner.spawn(sensor_recorder(shared_i2c0, shared_i2c1, pressure).unwrap());
 
     // Wait for RECORD_STATUS to be initialized by the SD card thread
     // Starts in Record::Setup and eventually moved to OFF/ON with next file number
@@ -221,7 +252,7 @@ async fn sensor_writer(spi: Spi<'static, Async>, cs: Output<'static>, delay: Del
 
     // We do not want to overwrite an existing file. Therefore keep trying to figure out
     // what the next available file number is
-    let mut current_file_num = loop {
+    let current_file_num = loop {
         let file_num = sd.find_last_numerical_file();
         if file_num != u16::MAX {
             break file_num; // breaks the loop and returns the value of file_num
@@ -241,16 +272,12 @@ async fn sensor_writer(spi: Spi<'static, Async>, cs: Output<'static>, delay: Del
     //   Write it
     // Yield until the next second increment
     loop {
-        while let Some(read_data) = { RING.lock().await.dequeue() } {
-            {
-                let current_record_status = RECORD_STATUS.lock().await;
-                current_file_num = match *current_record_status {
-                    Status::RecordingOff(num) => num,
-                    Status::RecordingOn(num) => num,
-                    Status::Setup => current_file_num,
-                }
-            }
-            sd.write(&read_data, &format!("{current_file_num}.leg"))
+        while let Some((file_num, read_data)) = { RING.lock().await.dequeue() } {
+            // Bind queued data to its original session, even if the switch has
+            // already started another recording before the SD task drains it.
+            // TODO(Nathan): SdController::write currently hides some write errors;
+            // decide retry/recovery there before claiming lossless SD recording.
+            sd.write(&read_data, &format!("{file_num}.leg"))
                 .expect("File is do broke :-(");
         }
 
@@ -265,15 +292,23 @@ async fn sensor_writer(spi: Spi<'static, Async>, cs: Output<'static>, delay: Del
 async fn sensor_recorder(
     i2c0: &'static Mutex<CriticalSectionRawMutex, I2c<'static, Async>>,
     i2c1: &'static Mutex<CriticalSectionRawMutex, I2c<'static, Async>>,
+    pressure: PressureReader<'static>,
 ) {
     let mut recorder = Recording::new(); // Buffer Controller
     // Remember the last state so we know if recording should be started / stopped
-    let mut last_status = *{ RECORD_STATUS.lock().await };
+    let mut last_status = Status::Setup;
+    let mut sensors = SensorReader::new(ImuReader::new(i2c0, i2c1, ACQUISITION_MODE), pressure);
+    for (slot, result) in sensors.initialize().await.iter().enumerate() {
+        info!("IMU slot {slot} initialization: {result:?}");
+    }
+    // Missing sensors do not block the others. No automatic hot-plug/reset:
+    // TODO(Nathan, Tim): agree on reconnect policy; for now reboot after attaching.
     let mut ticker = Ticker::every(Duration::from_hz(RECORD_HZ));
-
-    // ===================================
-    // TODO: Setup the IMUs / IMU Controller for each I2C bus
-    // ===================================
+    let mut sequence = 0u32;
+    let mut report_at = Instant::now().as_micros();
+    let mut polls = 0u32;
+    let mut fresh_counts = [0u32; 4];
+    let mut overruns = 0u32;
 
     loop {
         // Determine if GPIO has requested a start of stop to data collection
@@ -286,25 +321,52 @@ async fn sensor_recorder(
                     info!("Changing recording status to OFF");
                     recorder.stop_recording().await;
                 }
-                Status::RecordingOn(_) => {
+                Status::RecordingOn(file_num) => {
                     info!("Changing recording status to ON");
-                    recorder.start_recording();
+                    // Flush the old session if rapid switch changes skipped OFF.
+                    recorder.stop_recording().await;
+                    recorder.start_recording(file_num);
                 }
                 Status::Setup => {}
             }
         }
         last_status = current_status;
 
-        // create a new sensor data block, collect data, and push to the current sensor data buffer
+        // Always acquire for live consumers; the switch only gates SD buffering.
+        // The reader overlaps the two bus transfers, while the existing GPIO
+        // task/display and core-1 SD task continue independently.
+        let sample = sensors.read().await;
+        let sensor_record = frame::encode(&sample, sequence);
+        sequence = sequence.wrapping_add(1);
+        *LATEST_SENSOR_FRAME.lock().await = Some(sensor_record);
         if recorder.currently_recording {
-            // expects sensor_record to be in big endian order. This can be easily switched if that doesn't make sense
-            let mut sensor_record: [u8; BYTES_PER_RECORD] = [0; BYTES_PER_RECORD];
-
-            // insert timestamp at the end of a record
-            sensor_record[BYTES_PER_RECORD - 8..]
-                .copy_from_slice(&Instant::now().as_micros().to_be_bytes());
-
             recorder.write_to_buffer(&sensor_record).await;
+        }
+        polls += 1;
+        for (slot, count) in fresh_counts.iter_mut().enumerate() {
+            if sample.fresh_imu_mask() & (1 << slot) != 0 {
+                *count += 1;
+            }
+        }
+        // Do not spin trying to catch up missed deadlines. Log measured rates
+        // so a nominal 200-Hz ticker cannot be confused with fresh IMU output.
+        if Instant::now().as_micros() - sample.read_started_us >= 1_000_000 / RECORD_HZ {
+            overruns += 1;
+            ticker.reset();
+        }
+        let now = Instant::now().as_micros();
+        if now - report_at >= 1_000_000 {
+            info!(
+                "Sensor interval {} us: polls={}, fresh per slot={:?}, overruns={}",
+                now - report_at,
+                polls,
+                fresh_counts,
+                overruns
+            );
+            report_at = now;
+            polls = 0;
+            fresh_counts = [0; 4];
+            overruns = 0;
         }
         ticker.next().await;
     }
@@ -313,10 +375,11 @@ async fn sensor_recorder(
 pub struct Recording {
     // STRUCTURE
     // 2  bytes Block Size in bytes, inclusive
-    // 24 bytes Raw IMU Data x4
-    // 8  bytes Raw Pressure Data x4
-    // 24 bytes Raw IMU Data x4
-    // 8  bytes Raw Pressure Data x4
+    // Followed by whole 120-byte little-endian frames, then zero padding.
+    // TODO(Nathan, Tim): agree on file version/decoder. The outer inclusive
+    // length stays BIG endian for Nathan's existing SD block convention.
+    // A .leg file is not a flat stream of 120-byte frames. Old 40-byte files
+    // are incompatible; decoders must explicitly select this new format.
     // .............................
     // end padded with 0 until BUFFER_SIZE
     write_buffer: [u8; BUFFER_SIZE],
@@ -324,6 +387,7 @@ pub struct Recording {
     // don't need > 64k block so even though usize is u32, will cast to u16 when transcribing
     cursor: usize,
     currently_recording: bool,
+    file_num: u16,
 }
 
 impl Recording {
@@ -332,6 +396,7 @@ impl Recording {
             write_buffer: [0; BUFFER_SIZE],
             cursor: 2,
             currently_recording: false,
+            file_num: 0,
         }
     }
 
@@ -344,7 +409,9 @@ impl Recording {
         }
     }
 
-    pub fn start_recording(&mut self) {
+    pub fn start_recording(&mut self, file_num: u16) {
+        self.write_buffer.fill(0);
+        self.file_num = file_num;
         self.cursor = 2;
         self.currently_recording = true;
     }
@@ -354,9 +421,21 @@ impl Recording {
         self.write_buffer[0..2].copy_from_slice(&(self.cursor as u16).to_be_bytes());
 
         {
-            RING.lock().await.enqueue(self.write_buffer);
+            let mut ring = RING.lock().await;
+            // Never silently overwrite an older block in a full ring.
+            // TODO(Nathan, Tim): agree overflow policy/backpressure. Currently
+            // drop the new block, log it, and leave frame sequence gaps visible.
+            if ring.is_full() {
+                warn!(
+                    "Sensor SD queue full: dropping block for session {}",
+                    self.file_num
+                );
+            } else {
+                ring.enqueue((self.file_num, self.write_buffer));
+            }
         }
 
+        self.write_buffer.fill(0); // Partial final blocks must not retain old samples.
         self.cursor = 2; // Reserved for final write_buffer length
     }
 

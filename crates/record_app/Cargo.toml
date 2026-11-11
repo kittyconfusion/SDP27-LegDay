@@ -37,6 +37,8 @@ opt-level = 3
 legday-core = { path = "../legday-core" }
 
 embassy-sync = { version = "0.8" }
+# Poll the two independent I2C buses concurrently without spawning extra tasks.
+embassy-futures = "=0.1.2"
 
 embassy-embedded-hal = { version = "0.6" }
 
