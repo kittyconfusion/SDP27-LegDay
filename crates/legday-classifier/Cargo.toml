@@ -1,0 +1,15 @@
+# Motion classifier: preprocessing, CNN inference and the older centroid
+# baseline. No hardware dependencies, so it builds for the ESP32-S3 and for
+# tests on a computer.
+[package]
+name = "legday-classifier"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[dependencies]
+# Shared frame types (SensorFrame, FusedFrame, the window buffers).
+legday-core = { path = "../legday-core" }
+# Orientation filter, plus small math helpers (inv_sqrt, Q30 conversion).
+legday-fusion = { path = "../legday-fusion" }

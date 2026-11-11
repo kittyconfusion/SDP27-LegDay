@@ -14,16 +14,23 @@ use bin::sensors::{
     config::{AcquisitionMode, I2C_BUS_KHZ, SAMPLE_HZ},
     frame::{self, SensorFrame},
 };
+use legday_core::fused::{FusedFrame, FusedWindowBuffer};
 
 // One shared rate sets both polling and the hardware divider in config.rs.
 // TODO(Nathan, Tim): verify sustained fresh counts and synchronization on hardware;
-// a nominal 225-Hz setting does not guarantee every frame has four fresh IMUs.
+// a nominal 225-Hz setting does not guarantee every frame has four fresh IMUs
 const RECORD_HZ: u64 = SAMPLE_HZ;
-// Tim's 120-byte little-endian payload replaces the old 40-byte placeholder.
+
+// Last second at the nominal recording cadence; actual time coverage follows timestamps
+const HISTORY_FRAMES: usize = RECORD_HZ as usize;
+
+// Tim's 120-byte little-endian payload replaces the old 40-byte placeholder
 const BYTES_PER_RECORD: usize = frame::FRAME_BYTES;
-// Change to Demo to omit only the removable non-prosthetic lower reference.
-// TODO(Nathan, Tim): agree how the final application selects training/demo.
+
+// Change to Demo to omit only the removable non-prosthetic lower reference
+// TODO(Nathan, Tim): agree how the final application selects training/demo
 const ACQUISITION_MODE: AcquisitionMode = AcquisitionMode::Training;
+
 // Define the circular ring buffer used for sharing data between sensor and sd card threads
 const BUFFER_SIZE: usize = 8192;
 const NUM_BUFFERS: usize = 10;
@@ -71,12 +78,29 @@ static RECORD_STATUS: Mutex<CriticalSectionRawMutex, Status> = Mutex::new(Status
 
 // Acquisition continues while SD recording is off. A future simulation transport
 // can copy this snapshot without owning/reinitializing the hardware reader.
-// TODO(Nathan, Tim): this is latest-only, not a lossless stream. Transport and
-// quaternion generation remain their owners' work; use sequence to spot gaps.
+// This is latest-only; use the separate history below for a consistent window.
 static LATEST_SENSOR_FRAME: Mutex<CriticalSectionRawMutex, Option<SensorFrame>> = Mutex::new(None);
 
 pub async fn latest_sensor_frame() -> Option<SensorFrame> {
     *LATEST_SENSOR_FRAME.lock().await
+}
+
+// Separate from the SD queue: retain the latest 225 frames even when not recording.
+// Static storage avoids putting the ~27 kB window on a task's stack or heap.
+static SENSOR_HISTORY: Mutex<CriticalSectionRawMutex, FusedWindowBuffer<HISTORY_FRAMES>> =
+    Mutex::new(FusedWindowBuffer::new());
+
+// Copy the newest frames, oldest first, into caller-owned storage. A full-window
+// destination should be static/heap-backed. Run inference after this returns,
+// with the lock released, so classification does not hold up acquisition.
+pub async fn copy_sensor_history(output: &mut [SensorFrame]) -> usize {
+    let history = SENSOR_HISTORY.lock().await;
+    let count = output.len().min(history.len());
+    let first = history.len() - count;
+    for (index, destination) in output[..count].iter_mut().enumerate() {
+        *destination = history.get(first + index).unwrap().encode_le();
+    }
+    count
 }
 
 // Main thread-shared data buffer. RingBuffer loops around instead of overflowing and handles a whole lot for us
@@ -232,7 +256,7 @@ async fn main(spawner: Spawner) -> ! {
     let rec_switch = Input::new(recording_switch, InputConfig::default().with_pull(Pull::Up));
     let rec_light = Output::new(recording_light, Level::Low, OutputConfig::default());
 
-    // Know that file naming has been initialized. Start the gpio task now that display can be initialized.
+    // Know that file naming has been initialized. Start the gpio task now that display can be initialized
     spawner.spawn(gpio_loop(&RECORD_STATUS, rec_switch, rec_light, shared_i2c0).unwrap());
 
     info!("Core 0 fully initialized");
@@ -305,6 +329,14 @@ async fn sensor_recorder(
     // TODO(Nathan, Tim): agree on reconnect policy; for now reboot after attaching.
     let mut ticker = Ticker::every(Duration::from_hz(RECORD_HZ));
     let mut sequence = 0u32;
+    #[cfg(feature = "sensor-fusion")]
+    let mut fusion = legday_fusion::frame::FrameFusion::new(0.1);
+    info!(
+        "Sensor pipeline: software fusion={}, history={} frames, frame={} bytes",
+        cfg!(feature = "sensor-fusion"),
+        HISTORY_FRAMES,
+        BYTES_PER_RECORD
+    );
     let mut report_at = Instant::now().as_micros();
     let mut polls = 0u32;
     let mut fresh_counts = [0u32; 4];
@@ -337,7 +369,18 @@ async fn sensor_recorder(
         // task/display and core-1 SD task continue independently.
         let sample = sensors.read().await;
         let sensor_record = frame::encode(&sample, sequence);
+        #[cfg(feature = "sensor-fusion")]
+        let sensor_record = {
+            let mut decoded = legday_core::fused::FusedFrame::decode_le(&sensor_record);
+            fusion.update(&mut decoded);
+            decoded.encode_le()
+        };
         sequence = sequence.wrapping_add(1);
+        // Keep the final (optionally fused) frame in RAM before publishing or recording it.
+        SENSOR_HISTORY
+            .lock()
+            .await
+            .push(FusedFrame::decode_le(&sensor_record));
         *LATEST_SENSOR_FRAME.lock().await = Some(sensor_record);
         if recorder.currently_recording {
             recorder.write_to_buffer(&sensor_record).await;
@@ -362,6 +405,24 @@ async fn sensor_recorder(
                 polls,
                 fresh_counts,
                 overruns
+            );
+            let (history_len, history_span_us, oldest_checksum) = {
+                let history = SENSOR_HISTORY.lock().await;
+                let span = match (history.get(0), history.latest()) {
+                    (Some(first), Some(last)) => {
+                        last.raw.timestamp_us.saturating_sub(first.raw.timestamp_us)
+                    }
+                    _ => 0,
+                };
+                // Inspect one retained payload, not just the latest-frame snapshot.
+                let checksum = history.get(0).map_or(0u32, |frame| {
+                    frame.encode_le().iter().map(|byte| u32::from(*byte)).sum()
+                });
+                (history.len(), span, checksum)
+            };
+            info!(
+                "Sensor history: {}/{} frames, first-to-last={} us, oldest checksum={}",
+                history_len, HISTORY_FRAMES, history_span_us, oldest_checksum
             );
             report_at = now;
             polls = 0;

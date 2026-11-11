@@ -1,0 +1,12 @@
+# Software orientation (sensor fusion): Madgwick filter, gyro bias learning,
+# and the adapter that fills the quaternions of each recorded frame.
+[package]
+name = "legday-fusion"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[dependencies]
+# Shared frame types (FusedFrame, Quat6Raw, the status flag bits).
+legday-core = { path = "../legday-core" }

@@ -11,6 +11,8 @@ path = "record.rs"
 
 [features]
 default = ["esp32s3"]
+# Optional integration: fills quaternion bytes before publishing/recording frames.
+sensor-fusion = ["dep:legday-fusion"]
 esp32s3 = [
     "esp-backtrace/esp32s3",
     "esp-hal/esp32s3",
@@ -35,6 +37,7 @@ opt-level = 3
 
 [dependencies]
 legday-core = { path = "../legday-core" }
+legday-fusion = { path = "../legday-fusion", optional = true }
 
 embassy-sync = { version = "0.8" }
 # Poll the two independent I2C buses concurrently without spawning extra tasks.
