@@ -73,11 +73,11 @@ extern crate alloc;
 // FANCY STRING FORMATTING
 use alloc::format;
 
-//  === THREAD-SAFE VARIABLES ===
+//=========================== THREAD-SAFE VARIABLES ===================================
 static RECORD_STATUS: Mutex<CriticalSectionRawMutex, Status> = Mutex::new(Status::Setup);
 
 // Acquisition continues while SD recording is off. A future simulation transport
-// can copy this snapshot without owning/reinitializing the hardware reader.
+// can copy this snapshot without owning/reinitializing the hardware reader
 // This is latest-only; use the separate history below for a consistent window.
 static LATEST_SENSOR_FRAME: Mutex<CriticalSectionRawMutex, Option<SensorFrame>> = Mutex::new(None);
 
@@ -92,7 +92,7 @@ static SENSOR_HISTORY: Mutex<CriticalSectionRawMutex, FusedWindowBuffer<HISTORY_
 
 // Copy the newest frames, oldest first, into caller-owned storage. A full-window
 // destination should be static/heap-backed. Run inference after this returns,
-// with the lock released, so classification does not hold up acquisition.
+// with the lock released, so classification does not hold up acquisition
 pub async fn copy_sensor_history(output: &mut [SensorFrame]) -> usize {
     let history = SENSOR_HISTORY.lock().await;
     let count = output.len().min(history.len());
@@ -148,7 +148,7 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-    // ======= GPIO PINS =======
+    // ======================= GPIO PINS =======================================
     // SPI
     let sclk = peripherals.GPIO47;
     let miso = peripherals.GPIO38;
@@ -164,7 +164,7 @@ async fn main(spawner: Spawner) -> ! {
     let recording_light = peripherals.GPIO6;
     let recording_switch = peripherals.GPIO7;
 
-    // ======= THREAD SETUP =======
+    // ======================= THREAD SETUP ====================================
     // Core 0 needs to setup both I2C busses
     // THREAD: Sensors and Data -> Buffer
     // THREAD: GPIO
@@ -210,7 +210,7 @@ async fn main(spawner: Spawner) -> ! {
         },
     );
 
-    // ======= CORE 0 THREADING =======
+    // ============================ CORE 0 THREADING =====================================
     // Setup async I2C busses and add them to their mutex to allow multiple-thread use
     let i2c0 = I2c::new(
         peripherals.I2C0,
@@ -321,10 +321,13 @@ async fn sensor_recorder(
     let mut recorder = Recording::new(); // Buffer Controller
     // Remember the last state so we know if recording should be started / stopped
     let mut last_status = Status::Setup;
+
     let mut sensors = SensorReader::new(ImuReader::new(i2c0, i2c1, ACQUISITION_MODE), pressure);
+
     for (slot, result) in sensors.initialize().await.iter().enumerate() {
         info!("IMU slot {slot} initialization: {result:?}");
     }
+
     // Missing sensors do not block the others. No automatic hot-plug/reset:
     // TODO(Nathan, Tim): agree on reconnect policy; for now reboot after attaching.
     let mut ticker = Ticker::every(Duration::from_hz(RECORD_HZ));
@@ -337,6 +340,7 @@ async fn sensor_recorder(
         HISTORY_FRAMES,
         BYTES_PER_RECORD
     );
+
     let mut report_at = Instant::now().as_micros();
     let mut polls = 0u32;
     let mut fresh_counts = [0u32; 4];
@@ -367,6 +371,7 @@ async fn sensor_recorder(
         // Always acquire for live consumers; the switch only gates SD buffering.
         // The reader overlaps the two bus transfers, while the existing GPIO
         // task/display and core-1 SD task continue independently.
+
         let sample = sensors.read().await;
         let sensor_record = frame::encode(&sample, sequence);
         #[cfg(feature = "sensor-fusion")]
@@ -382,22 +387,28 @@ async fn sensor_recorder(
             .await
             .push(FusedFrame::decode_le(&sensor_record));
         *LATEST_SENSOR_FRAME.lock().await = Some(sensor_record);
+
         if recorder.currently_recording {
             recorder.write_to_buffer(&sensor_record).await;
         }
+
         polls += 1;
+
         for (slot, count) in fresh_counts.iter_mut().enumerate() {
             if sample.fresh_imu_mask() & (1 << slot) != 0 {
                 *count += 1;
             }
         }
+
         // Do not spin trying to catch up missed deadlines. Log measured rates
         // so the nominal polling cadence cannot be confused with fresh IMU output.
         if Instant::now().as_micros() - sample.read_started_us >= 1_000_000 / RECORD_HZ {
             overruns += 1;
             ticker.reset();
         }
+
         let now = Instant::now().as_micros();
+
         if now - report_at >= 1_000_000 {
             info!(
                 "Sensor interval {} us: polls={}, fresh per slot={:?}, overruns={}",
@@ -406,6 +417,7 @@ async fn sensor_recorder(
                 fresh_counts,
                 overruns
             );
+
             let (history_len, history_span_us, oldest_checksum) = {
                 let history = SENSOR_HISTORY.lock().await;
                 let span = match (history.get(0), history.latest()) {
@@ -414,16 +426,19 @@ async fn sensor_recorder(
                     }
                     _ => 0,
                 };
+
                 // Inspect one retained payload, not just the latest-frame snapshot.
                 let checksum = history.get(0).map_or(0u32, |frame| {
                     frame.encode_le().iter().map(|byte| u32::from(*byte)).sum()
                 });
+
                 (history.len(), span, checksum)
             };
             info!(
                 "Sensor history: {}/{} frames, first-to-last={} us, oldest checksum={}",
                 history_len, HISTORY_FRAMES, history_span_us, oldest_checksum
             );
+
             report_at = now;
             polls = 0;
             fresh_counts = [0; 4];
