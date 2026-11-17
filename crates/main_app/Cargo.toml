@@ -10,9 +10,10 @@ name = "sdp27-leg-day"
 path = "main.rs"
 
 [[bin]]
-name = "sd-card-test"
-path = "bin/sd-card-test.rs"
-required-features = ["esp32s3"]
+name = "sensor-test"
+path = "bin/sensor-test.rs"
+required-features = ["esp32c6"]
+
 
 [features]
 default = ["esp32s3"]
@@ -34,6 +35,9 @@ esp32c6 = [
     "esp-println/esp32c6",
     "esp-radio/esp32c6",
 ]
+# psram stuff requires release optimizations (but want the possibility of debug for the rest of the build)
+[profile.dev.package.esp-hal]
+opt-level = 3
 
 [dependencies]
 legday-core = { path = "../legday-core" }

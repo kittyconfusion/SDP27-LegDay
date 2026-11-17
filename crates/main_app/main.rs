@@ -15,6 +15,8 @@ use esp_hal::clock::CpuClock;
 #[cfg(feature = "esp32s3")]
 use esp_hal::lp_core::UlpCore;
 #[cfg(feature = "esp32s3")]
+use esp_hal::psram;
+#[cfg(feature = "esp32s3")]
 use esp_hal::system::Stack;
 #[cfg(feature = "esp32s3")]
 use static_cell::ConstStaticCell;
@@ -28,6 +30,7 @@ use log;
 use esp_backtrace as _;
 
 extern crate alloc;
+// use esp_alloc::Internal/External Memory to specify sram vs psram
 
 // Creates a default app-descriptor required by the esp-idf bootloader. aka makes things work right.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -63,6 +66,8 @@ async fn main(_spawner: Spawner) -> ! {
 
     #[cfg(feature = "esp32s3")]
     {
+        esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
+
         let mut ulp_core = UlpCore::new(peripherals.ULP_RISCV_CORE);
         ulp_controller::init(&mut ulp_core);
 
