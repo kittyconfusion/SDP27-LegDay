@@ -68,8 +68,15 @@ extern crate alloc;
 // FANCY STRING FORMATTING
 use alloc::format;
 
+use crate::bin::tasks::shared_status::{
+    GlobalConfig, preset_classifying_no_network, preset_demo_day, preset_sd_readout, preset_sensors,
+};
+
 //  === THREAD-SAFE VARIABLES ===
 static RECORD_STATUS: Mutex<CriticalSectionRawMutex, Status> = Mutex::new(Status::Setup);
+
+// With what functionality do we want to run with
+static GLOBAL_CONFIG: GlobalConfig = preset_sensors();
 
 // Acquisition continues while SD recording is off. A future simulation transport
 // can copy this snapshot without owning/reinitializing the hardware reader.
@@ -171,6 +178,12 @@ async fn main(spawner: Spawner) -> ! {
             static EXECUTOR: StaticCell<Executor> = StaticCell::new();
             let executor = EXECUTOR.init(Executor::new());
             executor.run(|spawner| {
+                if GLOBAL_CONFIG == preset_classifying_no_network() {
+                    // Create the classifying task thread
+                }
+                if GLOBAL_CONFIG == preset_demo_day() {
+                    // Create the network task thread
+                }
                 info!("Core 1 fully initialized");
             });
         },
@@ -212,8 +225,11 @@ async fn main(spawner: Spawner) -> ! {
     //let rec_switch = Input::new(recording_switch, InputConfig::default().with_pull(Pull::Up));
     //let rec_light = Output::new(recording_light, Level::Low, OutputConfig::default());
 
-    // Know that file naming has been initialized. Start the gpio task now that display can be initialized.
-    // spawner.spawn(gpio_loop(&RECORD_STATUS, rec_switch, rec_light, shared_i2c0).unwrap());
+    if GLOBAL_CONFIG != preset_sd_readout() {
+        // Start up sensor thread task
+
+        // Start up gpio thread task
+    }
 
     info!("Core 0 fully initialized");
 
