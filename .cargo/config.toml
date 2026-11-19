@@ -14,6 +14,7 @@ build-std = ["alloc", "core"]
 
 [alias]
 # run with "cargo run-c6" and "cargo build-c6
+run-record = "cargo run --package quadriceps"
 run-c6 = "run --no-default-features --features esp32c6 --target riscv32imac-unknown-none-elf"
 build-c6 = "build --no-default-features --features esp32c6 --target riscv32imac-unknown-none-elf"
 build-ulp = [

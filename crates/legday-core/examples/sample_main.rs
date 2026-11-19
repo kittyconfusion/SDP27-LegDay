@@ -1,0 +1,102 @@
+// This is meant to be a blank general-purpose main file that can be repurposed as the basis of any other app
+// Use as a basic reference
+#![no_std]
+#![no_main]
+#![deny(clippy::mem_forget)] // Should not be used so deny
+#![deny(clippy::large_stack_frames)] // General compiler error if allocate > 512kb at a time (main function given exemption)
+
+#[cfg(feature = "esp32s3")]
+use bin::ulp_controller;
+
+use embassy_executor::Spawner;
+use embassy_time::{Duration, Timer};
+use esp_hal::clock::CpuClock;
+
+#[cfg(feature = "esp32s3")]
+use esp_hal::lp_core::UlpCore;
+#[cfg(feature = "esp32s3")]
+use esp_hal::psram;
+#[cfg(feature = "esp32s3")]
+use esp_hal::system::Stack;
+#[cfg(feature = "esp32s3")]
+use static_cell::ConstStaticCell;
+
+use esp_hal::timer::timg::TimerGroup;
+use esp_println::println;
+use log;
+
+// Alternative to providing our own panic_handler
+// should print backtrace to serial upon fatal error
+use esp_backtrace as _;
+
+extern crate alloc;
+// use esp_alloc::Internal/External Memory to specify sram vs psram
+
+// Creates a default app-descriptor required by the esp-idf bootloader. aka makes things work right.
+esp_bootloader_esp_idf::esp_app_desc!();
+
+// Only need the Core 1 stack if the core actually exists
+#[cfg(feature = "esp32s3")]
+static CORE1_STACK: ConstStaticCell<Stack<8192>> = ConstStaticCell::new(Stack::new());
+
+// suppress compiler complaining about memory allocation
+#[allow(clippy::large_stack_frames)]
+#[esp_rtos::main]
+async fn main(_spawner: Spawner) -> ! {
+    esp_println::logger::init_logger_from_env(); // Makes log:: work
+
+    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
+    let peripherals = esp_hal::init(config);
+
+    // This is ram used by the bootloader and will be left otherwise unused
+    // able to be used for dynamic memory allocation
+    #[cfg(feature = "esp32s3")]
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
+
+    #[cfg(feature = "esp32c6")]
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 65536);
+
+    // COEX (the coexistance engine for wifi and bluetooth at the same time) needs more RAM
+    // esp_alloc::heap_allocator!(size: 64 * 1024);
+
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
+
+    log::info!("Embassy initialized!");
+
+    #[cfg(feature = "esp32s3")]
+    {
+        esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
+
+        let mut ulp_core = UlpCore::new(peripherals.ULP_RISCV_CORE);
+        ulp_controller::init(&mut ulp_core);
+
+        log::info!("S3 initialized");
+        esp_rtos::start_second_core(
+            peripherals.CPU_CTRL,
+            peripherals.FROM_CPU_INTR1,
+            CORE1_STACK.take(),
+            || {
+                // This is the second core (core 1)'s main loop!
+                log::info!("Core 1 running!");
+                // and immediately doing nothing (except for background async tasks)
+            },
+        );
+        loop {
+            log::info!("");
+            Timer::after(Duration::from_secs(5)).await;
+        }
+    }
+    #[cfg(feature = "esp32c6")]
+    {
+        log::info!("C6 initialized");
+        loop {
+            log::info!("Hello world!");
+            Timer::after(Duration::from_secs(5)).await;
+        }
+    }
+}
+
+// create chip specific code with
+// if cfg!(feature = "esp32s3")  // chooses whether to run at run-time
+// #[cfg(feature = "esp32s3")]   // chooses whether to include (at all) at compile-time
